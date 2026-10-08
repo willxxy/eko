@@ -48,14 +48,13 @@ uv run --script host.py --cwd ~/projects/my-project "Find and fix a bug"
 Use OpenRouter with `OPENROUTER_API_KEY` set:
 
 ```bash
-uv run --script host.py --provider openrouter --model anthropic/claude-sonnet-4.5
+OPENROUTER_API_KEY=$API_KEY uv run python host.py --provider openrouter --model nvidia/nemotron-3-ultra-550b-a55b:free
 ```
 
 Load a Hugging Face chat model by repository ID or local directory:
 
 ```bash
-uv run --with 'transformers>=4.51,<6' --with torch --with accelerate \
-  --script host.py --provider huggingface --model Qwen/Qwen2.5-0.5B-Instruct
+uv run python host.py --provider huggingface --model Qwen/Qwen3.5-0.8B
 ```
 
 Local models use their own chat template and accept text only. Weights load once;

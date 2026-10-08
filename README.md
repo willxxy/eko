@@ -10,8 +10,14 @@ terminal, model-provider, or sandbox dependency.
 An Eko process requires a host that provides a model conversation over the
 `EKO_MODEL` Unix socket. One connection to that socket is one independent model
 conversation. The included [`host.py`](host.py) supplies that service through the
-Claude Code CLI and adds the terminal interface, headless operation, authentication,
-and optional Bubblewrap sandbox.
+Claude Code CLI, OpenRouter, or a local Hugging Face model. It adds the terminal
+interface, headless operation, and optional Bubblewrap sandbox.
+
+Each provider has its own file in [`providers/`](providers/): `claude.py`,
+`openrouter.py`, and `huggingface.py`. The host selects one conversation factory;
+all providers share the model socket contract. OpenRouter and Hugging Face share
+in-memory history handling. Claude retains its CLI-managed sessions, recovery,
+streaming, and authentication.
 
 The whole agent is essentially:
 
@@ -38,6 +44,26 @@ Start the included host and terminal interface:
 uv run --script host.py
 uv run --script host.py --cwd ~/projects/my-project "Find and fix a bug"
 ```
+
+Use OpenRouter with `OPENROUTER_API_KEY` set:
+
+```bash
+uv run --script host.py --provider openrouter --model anthropic/claude-sonnet-4.5
+```
+
+Load a Hugging Face chat model by repository ID or local directory:
+
+```bash
+uv run --with 'transformers>=4.51,<6' --with torch --with accelerate \
+  --script host.py --provider huggingface --model Qwen/Qwen2.5-0.5B-Instruct
+```
+
+Local models use their own chat template and accept text only. Weights load once;
+agent conversations have separate histories and share one generation lock.
+OpenRouter and Hugging Face histories last for the host session. Both default to
+4096 output tokens per turn; override with `--max-tokens`. Truncated responses
+raise an error before any Python executes. `--effort`, `--session-id`, and
+`--resume` apply only to Claude.
 
 Run the same host without the terminal interface, or place the agent in a
 Bubblewrap sandbox:
@@ -125,12 +151,13 @@ execution.
 
 ## Requirements and tests
 
-Eko requires Python 3.10 or newer. The included host requires the Claude Code CLI
-and a working Claude subscription; it prompts for authentication when necessary.
-Sandboxing additionally requires Bubblewrap.
+Eko requires Python 3.10 or newer. The default provider requires the Claude Code
+CLI and a working Claude subscription; it prompts for authentication when
+necessary. OpenRouter requires an API key. Local Hugging Face models require
+Transformers, PyTorch, and Accelerate. Sandboxing requires Bubblewrap.
 
 Run the tests with:
 
 ```bash
-uv run --with prompt-toolkit --with rich python -m unittest -q test_eko.py
+uv run --with prompt-toolkit --with rich python -m unittest -q
 ```

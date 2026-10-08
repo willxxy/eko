@@ -20,6 +20,8 @@ from pathlib import Path
 
 import eko
 import host
+import providers
+from providers import claude
 from rich.console import Console
 
 
@@ -168,7 +170,7 @@ class CoreTests(unittest.TestCase):
             eko.Input(eko.TERMINAL, (eko.Text("hello"),)),
             eko.Input(eko.PYTHON, (eko.Text("output"),), 1),
         ))
-        content = host._claude_content(message)
+        content = claude._claude_content(message)
         self.assertEqual(content, [
             {"type": "text", "text": "[terminal]\n"},
             {"type": "text", "text": "hello"},
@@ -190,8 +192,7 @@ class ModelSocketTests(unittest.TestCase):
                 client.sendall(payload)
                 client.shutdown(socket.SHUT_WR)
                 model = FakeModel(lambda text, _cancelled: text)
-                with mock.patch.object(host, "Claude", return_value=model):
-                    host._model_client(server, Path.cwd(), "fake", "low")
+                host._model_client(server, model)
                 client.close()
 
     def test_model_connection_streams_and_returns_messages(self):
@@ -204,18 +205,16 @@ class ModelSocketTests(unittest.TestCase):
 
             def serve():
                 connection, _ = listener.accept()
-                host._model_client(
-                    connection, Path.cwd(), "fake", "low")
+                host._model_client(connection, model)
 
-            with mock.patch.object(host, "Claude", return_value=model):
-                thread = threading.Thread(target=serve, daemon=True)
-                thread.start()
-                remote = eko.Model(endpoint)
-                remote.start(eko.SYSTEM)
-                streamed = []
-                reply = remote.send(conversation("hello")[0], streamed.append)
-                remote.close()
-                thread.join(2)
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            remote = eko.Model(endpoint)
+            remote.start(eko.SYSTEM)
+            streamed = []
+            reply = remote.send(conversation("hello")[0], streamed.append)
+            remote.close()
+            thread.join(2)
             listener.close()
 
         self.assertEqual(reply, eko.Message("assistant", (eko.Text("HELLO"),)))
@@ -879,14 +878,15 @@ class ModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             session_id = "12345678-1234-5678-1234-567812345678"
-            server = host.ModelServer(
-                root / "model.sock", root, "fake", "low", session_id, True
-            )
+            with mock.patch.object(claude, "ensure_auth"):
+                factory = providers._factory(
+                    "claude", "fake", 4096, cwd=root, effort="low",
+                    session_id=session_id, resume=True)
+            server = host.ModelServer(root / "model.sock", factory)
             observed = []
 
-            def model_client(connection, _cwd, _model, _effort,
-                             assigned=None, resume=False):
-                observed.append((assigned, resume))
+            def model_client(connection, backend):
+                observed.append((backend.session_id, backend.started))
                 connection.close()
 
             with mock.patch.object(host, "_model_client", side_effect=model_client):
@@ -898,7 +898,8 @@ class ModelTests(unittest.TestCase):
                 wait_until(lambda: len(observed) == 2)
                 server.close()
 
-        self.assertCountEqual(observed, [(session_id, True), (None, False)])
+        self.assertCountEqual(observed, [(session_id, True), (mock.ANY, False)])
+        self.assertEqual(len({assigned for assigned, _ in observed}), 2)
 
     def test_host_accepts_an_explicit_world_socket(self):
         with (
@@ -946,7 +947,7 @@ class ModelTests(unittest.TestCase):
         prompt = eko.SYSTEM.format(name="Moa", folder="/workspace", mode="")
         self.assertTrue(prompt.startswith("You are Moa.\nYou are in /workspace.\n"))
         self.assertEqual(eko.NAME, "Eko")
-        model = host.Claude(Path("/host/private"), "fake", "low")
+        model = claude.Claude(Path("/host/private"), "fake", "low")
         self.assertEqual(model.cwd, Path("/host/private"))
 
     def test_host_launches_the_provider_neutral_core(self):
@@ -1196,7 +1197,7 @@ print("DAEMONS", *(process.pid for process in processes))
                     client.join(5)
 
     def test_close_tolerates_concurrent_interrupt_clearing_process(self):
-        model = host.Claude(Path.cwd(), "fake", "low")
+        model = claude.Claude(Path.cwd(), "fake", "low")
         stdout = io.BytesIO()
 
         class Process:
@@ -1217,7 +1218,7 @@ print("DAEMONS", *(process.pid for process in processes))
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "projects" / "project"
             project.mkdir(parents=True)
-            model = host.Claude(Path.cwd(), "fake", "low")
+            model = claude.Claude(Path.cwd(), "fake", "low")
             model.started = True
             agent = project / f"{model.session_id}.jsonl"
             unchanged = '{"type":"user","message":{"content":[{"type":"text","text":""}]}}\n'
@@ -1258,7 +1259,7 @@ print("DAEMONS", *(process.pid for process in processes))
             self.assertEqual(len(starts), 2)
 
     def test_failed_resume_can_recover_same_session(self):
-        model = host.Claude(Path.cwd(), "fake", "low")
+        model = claude.Claude(Path.cwd(), "fake", "low")
         model.started = True
         session_id = model.session_id
         failed = json.dumps({
@@ -1292,7 +1293,7 @@ print("DAEMONS", *(process.pid for process in processes))
         model.close()
 
     def test_failed_resume_retries_without_resetting_session(self):
-        model = host.Claude(Path.cwd(), "fake", "low")
+        model = claude.Claude(Path.cwd(), "fake", "low")
         model.started = True
         session_id = model.session_id
         event = json.dumps({
@@ -1313,7 +1314,7 @@ print("DAEMONS", *(process.pid for process in processes))
             model.started = True
 
         model._start = start
-        with mock.patch.object(host, "CALL_TIMEOUT", .5):
+        with mock.patch.object(claude, "CALL_TIMEOUT", .5):
             with self.assertRaisesRegex(RuntimeError, "context was not reset"):
                 model.complete(eko.SYSTEM, conversation("orphaned output")[0], lambda _: None)
         self.assertGreaterEqual(len(starts), 2)
@@ -1321,7 +1322,7 @@ print("DAEMONS", *(process.pid for process in processes))
         self.assertEqual(model.session_id, session_id)
 
     def test_multiple_events_buffered_in_one_write_do_not_stall(self):
-        model = host.Claude(Path.cwd(), "fake", "low")
+        model = claude.Claude(Path.cwd(), "fake", "low")
         events = [
             {"type": "stream_event", "event": {
                 "type": "content_block_delta",
@@ -1351,7 +1352,7 @@ print("DAEMONS", *(process.pid for process in processes))
         model.close()
 
     def test_interrupt_does_not_race_with_stdout_reader(self):
-        model = host.Claude(Path.cwd(), "fake", "low")
+        model = claude.Claude(Path.cwd(), "fake", "low")
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(10)"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,

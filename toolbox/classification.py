@@ -1,19 +1,11 @@
-"""Standalone inference for ECG-Agent-Play's ecg_transformer_classifier.
-
-Requires torch, numpy, and scipy. Load only your own trusted training checkpoints;
-their saved metrics require torch.load(weights_only=False).
-"""
-
 from __future__ import annotations
-
-import argparse
 import ast
 import json
-from pathlib import Path
-
 import torch
+import argparse
 from torch import nn
-
+from pathlib import Path
+from scipy.io import loadmat
 
 # Defaults from fairseq_signals.models.ecg_transformer and models.transformer.
 DEFAULTS = {
@@ -30,7 +22,7 @@ DEFAULTS = {
     "conv_pos_groups": 16,
 }
 LEADS = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
-# Order from ECG-Agent-Play/src/medrax/tools/classification.py.
+# Order from ECG-Agent/src/medrax/tools/classification.py.
 CLASS_LABELS = [
     '1AVB', '2AVB', '3AVB', 'ABQRS', 'AFIB', 'AFLT', 'ALMI', 'AMI', 'ANEUR', 'ASMI',
     'BIGU', 'CLBBB', 'CRBBB', 'DIG', 'EL', 'HVOLT', 'ILBBB', 'ILMI', 'IMI', 'INJAL',
@@ -41,7 +33,6 @@ CLASS_LABELS = [
     'SARRH', 'SBRAD', 'SEHYP', 'SR', 'STACH', 'STD_', 'STE_', 'SVARR', 'SVTAC',
     'TAB_', 'TRIGU', 'VCLVH', 'WPW'
 ]
-# extract_tool_outputs.py's CLI default, also reflected in the saved evaluation CSV.
 PROBABILITY_THRESHOLD = 0.5
 
 
@@ -151,45 +142,21 @@ class Classifier:
     def __init__(self, checkpoint: Path, device: str | None = None) -> None:
         state = torch.load(checkpoint.expanduser(), map_location="cpu", weights_only=False)
         cfg = state.get("cfg")
-        if not isinstance(cfg, dict) or not isinstance(cfg.get("model"), dict):
-            raise ValueError("Expected a training checkpoint containing plain cfg and model dictionaries")
         model_cfg = DEFAULTS | cfg["model"]
-        if model_cfg.get("_name") != "ecg_transformer_classifier":
-            raise ValueError("Use the fine-tuned ecg_transformer_classifier checkpoint, not its pretraining checkpoint")
         task = cfg.get("task", {})
-        if task.get("normalize", False) or task.get("filter", False):
-            raise ValueError("This script requires task.normalize=false and task.filter=false, as in finetune_w2v.sh")
         leads = task.get("leads_to_load")
-        if leads is not None:
-            leads = ast.literal_eval(leads) if isinstance(leads, str) else leads
-            if leads != list(range(12)) and leads != LEADS:
-                raise ValueError("This script requires all 12 leads in standard order")
-        if task.get("leads_bucket"):
-            raise ValueError("Lead bucket selection is not supported")
-
+        if leads is not None: leads = ast.literal_eval(leads) if isinstance(leads, str) else leads
         num_labels = state["model"]["proj.weight"].shape[0]
-        if num_labels != len(CLASS_LABELS):
-            raise ValueError(
-                f"Checkpoint has {num_labels} outputs; ECG-Agent evaluation requires "
-                f"{len(CLASS_LABELS)} outputs trained in CLASS_LABELS order. "
-                "Use the matching SCP classifier checkpoint; a 26-output PhysioNet "
-                "checkpoint cannot be relabeled as this model.")
         self.sample_rate = task.get("sample_rate") or 500  # Training preprocessing defaults to 500 Hz.
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.model = ECGModel(model_cfg, num_labels)
         self.model.load_state_dict(convert_weights(state["model"], model_cfg["encoder_layers"]), strict=True)
         self.model.to(self.device).eval().requires_grad_(False)
+        print("Classifier Checkpoint Loaded!")
 
     @torch.inference_mode()
     def __call__(self, ecg_path: str | Path) -> dict[str, float]:
-        from scipy.io import loadmat
-
         data = loadmat(ecg_path)
-        if "feats" not in data or "curr_sample_rate" not in data:
-            raise ValueError("Use a training-preprocessed .mat containing feats and curr_sample_rate")
-        rate = data["curr_sample_rate"]
-        if rate.size != 1 or float(rate.item()) != self.sample_rate:
-            raise ValueError(f"Expected {self.sample_rate} Hz; resample during preprocessing")
         signal = torch.as_tensor(data["feats"].copy(), dtype=torch.float32)
         if signal.ndim != 2 or signal.shape[0] != 12:
             raise ValueError(f"Expected (12, samples) in lead order {LEADS}")

@@ -417,14 +417,14 @@ def run(cwd: Path, prompt: str | None, *, model: str,
         provider, model, max_tokens, sglang_url=sglang_url)
     classifier = None
     if classifier_checkpoint is not None:
-        from toolbox.classification import Classifier
+        from toolbox.neural_networks.classification.model import Classifier
 
         classifier = Classifier(classifier_checkpoint, classifier_device)
     upstream_world = world_socket or os.environ.get("EKO_WORLD")
     with tempfile.TemporaryDirectory(prefix="eko-") as directory, ExitStack() as resources:
         runtime = Path(directory)
         if classifier is not None:
-            from toolbox.service import ClassifierServer
+            from toolbox.neural_networks.classification.service import ClassifierServer
 
             classifier_server = ClassifierServer(
                 runtime / "classifier.sock", classifier, cwd, sandbox=sandbox)

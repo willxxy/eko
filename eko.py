@@ -162,7 +162,8 @@ class Eko:
             self.system += f"\n{CLEAN_WORKSPACE}\n"
         if os.environ.get("EKO_CLASSIFIER"):
             self.system += (
-                "\nECG classification tool: from toolbox import ecg_classifier; "
+                "\nECG classification tool: "
+                "from toolbox.neural_networks.classification import ecg_classifier; "
                 "print(ecg_classifier('record.mat')). Input: a workspace .mat with "
                 "training-preprocessed feats (12 leads, samples) and curr_sample_rate. "
                 "Lead order: I, II, III, aVR, aVL, aVF, V1-V6. "

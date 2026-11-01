@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 measurements = ["joblib", "neurokit2", "numpy"]
+classification = ["numpy", "scipy"]
 
 [project.scripts]
 eko = "host:main"

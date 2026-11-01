@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import os
 import shutil
@@ -321,7 +322,8 @@ def mount_parents(path: Path) -> list[str]:
 def agent_command(cwd: Path, runtime: Path, *, sandbox: bool,
                   feral: bool, name: str, context: int = 0,
                   python_timeout: float = core.PYTHON_TIMEOUT,
-                  clean_workspace: bool = False) -> list[str]:
+                  clean_workspace: bool = False,
+                  classifier: bool = False) -> list[str]:
     source = Path(core.__file__).resolve()
     arguments = ["--cwd", "/workspace" if sandbox else str(cwd),
                  "--model-socket",
@@ -355,6 +357,8 @@ def agent_command(cwd: Path, runtime: Path, *, sandbox: bool,
         mapped = str(Path("/opt/eko") / relative)
         if mapped not in package_paths:
             package_paths.append(mapped)
+    if classifier:
+        package_paths.append("/run/eko")
     return [
         bwrap, "--die-with-parent", "--new-session", "--as-pid-1",
         "--clearenv", "--unshare-user", "--unshare-pid", "--unshare-ipc",
@@ -367,6 +371,8 @@ def agent_command(cwd: Path, runtime: Path, *, sandbox: bool,
         "--ro-bind", str(environment), "/opt/eko", "--dir", "/run",
         "--ro-bind", str(source), "/run/eko.py",
         "--bind", str(cwd), "/workspace", "--bind", str(runtime), "/run/eko",
+        *(["--ro-bind", str(source.parent / "toolbox"), "/run/eko/toolbox"]
+          if classifier else []),
         "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
         "--remount-ro", "/", "--setenv", "HOME", "/workspace",
         "--setenv", "TMPDIR", "/tmp", "--setenv", "LANG", "C.UTF-8",
@@ -375,6 +381,7 @@ def agent_command(cwd: Path, runtime: Path, *, sandbox: bool,
         "--setenv", "VIRTUAL_ENV", "/opt/eko",
         "--setenv", "EKO_MODEL", "/run/eko/model.sock",
         "--setenv", "EKO_WORLD", "/run/eko/world.sock",
+        *(["--setenv", "EKO_CLASSIFIER", "/run/eko/classifier.sock"] if classifier else []),
         "--chdir", "/workspace", str(interpreter), "/run/eko.py",
         *arguments,
     ]
@@ -400,15 +407,29 @@ def run(cwd: Path, prompt: str | None, *, model: str,
         clean_workspace: bool = False,
         python_timeout: float = core.PYTHON_TIMEOUT,
         provider: str = "sglang", max_tokens: int = 4096,
-        sglang_url: str | None = None) -> None:
+        sglang_url: str | None = None,
+        classifier_checkpoint: Path | None = None,
+        classifier_device: str | None = None) -> None:
     cwd = cwd.expanduser().resolve()
     if not cwd.is_dir():
         raise ValueError(f"not a directory: {cwd}")
     factory = providers.factory(
         provider, model, max_tokens, sglang_url=sglang_url)
+    classifier = None
+    if classifier_checkpoint is not None:
+        from toolbox.classification import Classifier
+
+        classifier = Classifier(classifier_checkpoint, classifier_device)
     upstream_world = world_socket or os.environ.get("EKO_WORLD")
-    with tempfile.TemporaryDirectory(prefix="eko-") as directory:
+    with tempfile.TemporaryDirectory(prefix="eko-") as directory, ExitStack() as resources:
         runtime = Path(directory)
+        if classifier is not None:
+            from toolbox.service import ClassifierServer
+
+            classifier_server = ClassifierServer(
+                runtime / "classifier.sock", classifier, cwd, sandbox=sandbox)
+            classifier_server.start()
+            resources.callback(classifier_server.close)
         server = ModelServer(runtime / "model.sock", factory)
         server.start()
         relay = (
@@ -422,12 +443,17 @@ def run(cwd: Path, prompt: str | None, *, model: str,
         environment.pop("OPENROUTER_API_KEY", None)
         environment.pop("SGLANG_API_KEY", None)
         environment.pop("HF_TOKEN", None)
+        environment.pop("EKO_CLASSIFIER", None)
+        if classifier is not None:
+            environment["EKO_CLASSIFIER"] = str(runtime / "classifier.sock")
+            environment["PYTHONPATH"] = os.pathsep.join(filter(None, (
+                str(Path(__file__).resolve().parent), environment.get("PYTHONPATH"))))
         environment["EKO_WORLD"] = str(runtime / "world.sock")
         agent = AgentProcess(
             agent_command(
                 cwd, runtime, sandbox=sandbox, feral=feral, name=name,
                 context=context, clean_workspace=clean_workspace,
-                python_timeout=python_timeout
+                python_timeout=python_timeout, classifier=classifier is not None
             ),
             env=environment,
         )
@@ -480,6 +506,10 @@ def main() -> None:
                         help="SGLang server root URL (default: SGLANG_URL or "
                              "http://127.0.0.1:30002)")
     parser.add_argument("--name", default=core.NAME)
+    parser.add_argument("--classifier-checkpoint", type=Path,
+                        help="load a trusted fine-tuned ECG classifier once at startup")
+    parser.add_argument("--classifier-device",
+                        help="classifier device (default: CUDA when available, else CPU)")
     parser.add_argument("--context", type=int, default=0)
     parser.add_argument(
         "--python-timeout", type=float, default=core.PYTHON_TIMEOUT,
@@ -512,7 +542,9 @@ def main() -> None:
             clean_workspace=args.clean_workspace,
             python_timeout=args.python_timeout,
             provider=args.provider, max_tokens=args.max_tokens,
-            sglang_url=args.sglang_url)
+            sglang_url=args.sglang_url,
+            classifier_checkpoint=args.classifier_checkpoint,
+            classifier_device=args.classifier_device)
 
     try:
         if args.feral and args.cwd is None:
@@ -520,7 +552,7 @@ def main() -> None:
                 launch(Path(directory))
         else:
             launch(args.cwd or Path.cwd())
-    except (RuntimeError, ValueError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))
 
 

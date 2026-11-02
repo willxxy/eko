@@ -38,8 +38,20 @@ def load_ecg(ecg_path: Path) -> tuple[np.ndarray, int | None]:
     Rows must start with leads I and II; measurements use lead II.
     Return None for an unknown sampling rate; measurements then use 500 Hz.
     """
-    # TODO: Open ecg_path and return its ECG array and sampling rate.
-    raise NotImplementedError("Implement ECG loading in toolbox/measurements/load.py")
+    from scipy.io import loadmat
+
+    data = loadmat(ecg_path)
+    signal = np.asarray(data["feats"], dtype=float)
+    rate = data.get("curr_sample_rate")
+    if rate is None:
+        return signal, None
+    rate = np.asarray(rate)
+    if rate.size != 1:
+        raise ValueError("curr_sample_rate must be a scalar")
+    rate = float(rate.item())
+    if not np.isfinite(rate) or rate <= 0 or not rate.is_integer():
+        raise ValueError("curr_sample_rate must be a positive integer")
+    return signal, int(rate)
 
 @cache.cache
 def prepare(ecg_path: str, file_version: tuple, neurokit_version: str) -> ECG:

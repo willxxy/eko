@@ -20,7 +20,6 @@ from typing import Callable
 
 import eko as core
 import providers
-from ui import UI
 
 
 # ── Agent process and model service ──────────────────────────────────────────
@@ -469,6 +468,8 @@ def run(cwd: Path, prompt: str | None, *, model: str,
                 while agent.proc.poll() is None:
                     time.sleep(.2)
                 return
+            from ui import UI
+
             ui = UI(context=context)
             ui.header(cwd, model, name)
             ui.connect(agent)

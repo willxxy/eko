@@ -1,0 +1,1 @@
+"""Standalone ECG-MTD benchmark."""

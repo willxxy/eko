@@ -24,8 +24,11 @@ def reference_history(dialogue, user_index):
             position += 1
         if position >= user_index:
             break
-        entry = {key: turn[key] for key in ("role", "action", "content", "tool_output")
-                 if key in turn}
+        fields = ("role", "content")
+        if turn["role"] == "assistant":
+            fields = ("role", "action", "thought",
+                      "tool_output" if "tool_output" in turn else "content")
+        entry = {key: turn[key] for key in fields if key in turn}
         history.append(entry)
     return history
 

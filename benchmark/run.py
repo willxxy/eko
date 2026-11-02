@@ -28,7 +28,10 @@ and answers concise. Interpret findings when relevant. Explain when a request is
 beyond the tools or requires medical professional consultation. End politely when thanked.
 ECG: record.mat. Dialogue context: {leads}.
 Tools use all 12 leads; measurements use lead II, matching ECG-Agent.
-Use tools for new findings and prior results for follow-ups. Explain tool limitations.
+The file contains waveforms, not findings. Run the appropriate tool before making
+new claims about this ECG. Reuse prior tool results for follow-ups. General
+questions and farewells do not require tools. Never invent findings or measurements.
+Explain tool limitations, including missing results.
 
 To measure heart rate (bpm), PR interval, QRS duration, and QTc interval (ms):
 ```python-run
@@ -36,7 +39,7 @@ from toolbox.measurements.ecg_analysis import ecg_analysis
 print(ecg_analysis('record.mat'))
 ```
 
-To classify ECG findings:
+To identify arrhythmias, abnormalities, and other ECG findings:
 ```python-run
 from toolbox.neural_networks.classification import ecg_classifier
 print(ecg_classifier('record.mat'))
@@ -192,8 +195,10 @@ def main():
     parser.add_argument("--provider", choices=("sglang", "openrouter", "huggingface"), default="sglang")
     parser.add_argument("--model", required=True)
     parser.add_argument("--sglang-url")
-    parser.add_argument("--max-tokens", type=int, default=4096)
-    parser.add_argument("--classifier-checkpoint", type=Path)
+    parser.add_argument("--max-tokens", type=int, default=512,
+                        help="Output tokens per model step (ECG-Agent default: 512)")
+    parser.add_argument("--classifier-checkpoint", type=Path, required=True,
+                        help="Fine-tuned 71-label checkpoint; both ECG tools must be available")
     parser.add_argument("--classifier-device")
     parser.add_argument("--execution", choices=("sandbox", "local"), default="sandbox")
     parser.add_argument("--turn-timeout", type=float, default=300,
@@ -207,16 +212,15 @@ def main():
     args.leads = lead_context(args.dataset, args.leads)
     args.ecg_dir = args.ecg_dir.expanduser().resolve()
     settings = {key: value for key, value in vars(args).items() if key not in ("config", "output")}
-    settings.update(tool_leads="12-lead", measurement_lead="II", temperature=0.0)
+    settings.update(tool_leads="12-lead", measurement_lead="II", temperature=0.0,
+                    instruction=INSTRUCTION)
     save_settings(args.output, settings)
     cases = load_cases(args.dataset, args.split, args.max_samples, args.leads)
     previous = {r["case_id"]: r for r in read_rows(args.output)} if args.output.exists() else {}
     factory = providers.factory(args.provider, args.model, args.max_tokens, sglang_url=args.sglang_url)
-    classifier = None
-    if args.classifier_checkpoint:
-        from toolbox.neural_networks.classification.model import Classifier
+    from toolbox.neural_networks.classification.model import Classifier
 
-        classifier = Classifier(args.classifier_checkpoint, args.classifier_device)
+    classifier = Classifier(args.classifier_checkpoint, args.classifier_device)
     completed = failed = skipped = 0
     turn_counts = Counter()
     unattempted = 0

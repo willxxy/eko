@@ -13,7 +13,7 @@ def parse_args(parser, section):
     parser.add_argument("--split", default="test")
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--leads", choices=LEAD_CONTEXTS,
-                        help="Waveform leads; inferred from the dataset when omitted")
+                        help="Dialogue lead context; tools always receive all 12 leads")
     parser.add_argument("--history", choices=("generated", "ground_truth"), default="generated")
     probe = argparse.ArgumentParser(add_help=False)
     probe.add_argument("--config", type=Path)
@@ -24,7 +24,7 @@ def parse_args(parser, section):
         defaults.update(settings.get(section, {}))
         parser.set_defaults(**defaults)
         for action in parser._actions:
-            if action.dest in defaults:
+            if defaults.get(action.dest) is not None:
                 action.required = False
     args = parser.parse_args()
     if args.max_samples is not None and args.max_samples <= 0:

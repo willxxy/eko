@@ -200,7 +200,12 @@ def main():
                           "status": "error", "error": str(error), "turns": []}
             append(stream, record)
             failed += record["status"] != "ok"
-            print(f"{key}: {record['status']}", flush=True)
+            status = record["status"]
+            if status == "error":
+                error = next((turn["error"] for turn in record["turns"] if turn.get("error")),
+                             record.get("error", "Unknown error"))
+                status += f": {error}"
+            print(f"{key}: {status}", flush=True)
     if failed:
         raise SystemExit(1)
 

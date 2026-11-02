@@ -78,7 +78,7 @@ uv run python host.py --provider sglang \
 
 ## ECG-Agent adaptation
 
-For all current measurements in `toolxbo/measurements/`, we follow [ECG-Agent](https://github.com/gustmd0121/ECG-Agent) exactly in calculating them. We also maintain the exact tools used in ECG-Agent, and shown to the LLM.
+For all current measurements in `toolbox/measurements/`, we follow [ECG-Agent](https://github.com/gustmd0121/ECG-Agent) exactly in calculating them. We also maintain the exact tools used in ECG-Agent, and shown to the LLM.
 
 ### Notes
 - ECG-Agent seems to use all four measurements?

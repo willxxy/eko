@@ -72,7 +72,7 @@ def load_cases(dataset=DATASET, split="test", max_samples=None, leads=None):
         metadata = json.loads(row["metadata"])
         dialogue = json.loads(row["dialogue"])
         cases.append({"case_id": str(metadata["ecg_id"]), "leads": leads,
-                      "ecg_file": json.loads(row["ecg_files"])[0],
+                      "ecg_file": metadata["ecg_lookup_filename_used"],
                       "cefr_level": metadata["cefr_level"],
                       "user_turns": [turn["content"] for turn in dialogue if turn["role"] == "user"],
                       "reference_dialogue": dialogue})
@@ -80,27 +80,18 @@ def load_cases(dataset=DATASET, split="test", max_samples=None, leads=None):
 
 
 def prepare_ecg(ecg_dir, ecg_file, destination, leads="12-lead"):
-    """Write the selected leads from a MAT or PTB-XL record."""
+    """Write the selected leads from ECG-Agent's preprocessed MAT file."""
     import numpy as np
     from scipy.io import loadmat, savemat
 
     ecg_dir = Path(ecg_dir).resolve()
-    source = (ecg_dir / ecg_file).resolve()
+    # ECG-Agent preprocessing writes HR25.mat; the dataset names HR00025.mat.
+    ecg_id = int(Path(ecg_file).stem.removeprefix("HR"))
+    source = (ecg_dir / f"HR{ecg_id}.mat").resolve()
     source.relative_to(ecg_dir)
-    if source.is_file():
-        data = loadmat(source)
-        signal = np.asarray(data["feats"])
-        rate = data.get("curr_sample_rate")
-    else:
-        import wfdb
-
-        ecg_id = int(Path(ecg_file).stem.removeprefix("HR"))
-        folder = f"{ecg_id // 1000 * 1000:05d}"
-        records = ecg_dir / "records500" if (ecg_dir / "records500").is_dir() else ecg_dir
-        record = records / folder / f"{ecg_id:05d}_hr"
-        signal, metadata = wfdb.rdsamp(str(record))
-        signal = signal.T
-        rate = metadata["fs"]
+    data = loadmat(str(source))
+    signal = np.asarray(data["feats"])
+    rate = data.get("curr_sample_rate")
 
     rate = int(np.asarray(500 if rate is None else rate).item())
     if rate != 500:

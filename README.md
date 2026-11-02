@@ -90,7 +90,7 @@ uv sync --extra benchmark
 
 uv run python -m benchmark.run \
   --config benchmark/experiments/single-lead-I-gt-reference-history.json \
-  --ecg-dir /path/to/ptb-xl \
+  --ecg-dir /path/to/ptbxl_preprocessed/mat_files \
   --model Qwen/Qwen3.8-27B \
   --sglang-url http://127.0.0.1:30001 \
   --classifier-checkpoint /path/to/checkpoint.pt
@@ -107,8 +107,9 @@ paths are relative to the working directory. Use separate outputs when changing 
 prior reference messages and tool outputs. The current reference answer is excluded.
 Both modes receive tool examples every turn and execute tools for new findings.
 
-Input: full 12-lead MAT or PTB-XL `records500` files. Single-lead runs zero other
-channels; measurements use I for single-lead-I, II otherwise. Classifier accuracy
+Input: ECG-Agent's preprocessed 12-lead MAT files (`HR25.mat` for dataset filename
+`HR00025.mat`). Single-lead runs zero other channels; measurements use I for
+single-lead-I, II otherwise. Classifier accuracy
 on masked inputs requires validation. Classification requires a checkpoint.
 
 Scoring requires `OPENROUTER_API_KEY`; `--dry-run` saves prompts only.

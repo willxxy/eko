@@ -361,7 +361,7 @@ def agent_command(cwd: Path, runtime: Path, *, sandbox: bool,
         package_paths.append("/run/eko")
     return [
         bwrap, "--die-with-parent", "--new-session", "--as-pid-1",
-        "--clearenv", "--unshare-user", "--unshare-pid", "--unshare-ipc",
+        "--unshare-user", "--unshare-pid", "--unshare-ipc",
         "--unshare-uts", "--unshare-cgroup", "--unshare-net",
         "--ro-bind", "/usr", "/usr",
         "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib",
@@ -455,7 +455,8 @@ def run(cwd: Path, prompt: str | None, *, model: str,
                 context=context, clean_workspace=clean_workspace,
                 python_timeout=python_timeout, classifier=classifier is not None
             ),
-            env=environment,
+            # Bubblewrap's --setenv options supply the sandbox environment.
+            env={} if sandbox else environment,
         )
         try:
             if not agent.ready.wait(10) or agent.proc.poll() is not None:

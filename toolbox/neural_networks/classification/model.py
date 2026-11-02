@@ -147,6 +147,10 @@ class Classifier:
         leads = task.get("leads_to_load")
         if leads is not None: leads = ast.literal_eval(leads) if isinstance(leads, str) else leads
         num_labels = state["model"]["proj.weight"].shape[0]
+        if num_labels != len(CLASS_LABELS):
+            raise ValueError(
+                f"ECG-Agent requires {len(CLASS_LABELS)} classifier outputs; "
+                f"checkpoint has {num_labels}")
         self.sample_rate = task.get("sample_rate") or 500  # Training preprocessing defaults to 500 Hz.
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.model = ECGModel(model_cfg, num_labels)

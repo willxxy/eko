@@ -33,7 +33,6 @@ To classify ECG findings:
 from toolbox.neural_networks.classification import ecg_classifier
 print(ecg_classifier('record.mat'))
 ```
-Classification: {classification_status}. Call only when available.
 
 Execute tools using Python and print their results before answering.
 End each completed user answer with <done/>.
@@ -123,8 +122,6 @@ def run_session(case, ecg_dir, factory, classifier, args, indices):
         try:
             if not agent.ready.wait(10) or agent.proc.poll() is not None:
                 raise RuntimeError(agent.startup_error())
-            classification_status = ("available" if classifier is not None else
-                                     "unavailable because no checkpoint is loaded")
             for index in indices:
                 query = case["user_turns"][index]
                 history = ""
@@ -132,8 +129,7 @@ def run_session(case, ecg_dir, factory, classifier, args, indices):
                     history = ("Previous reference conversation (before the current question):\n"
                                + json.dumps(reference_history(case["reference_dialogue"], index),
                                             ensure_ascii=False))
-                prompt = INSTRUCTION.format(classification_status=classification_status, query=query,
-                                            leads=case["leads"], history=history)
+                prompt = INSTRUCTION.format(query=query, leads=case["leads"], history=history)
                 result = answer(agent, events, prompt, args.turn_timeout, args.max_steps)
                 record["turns"].append({"turn": index, "query": query, **result})
                 if result["status"] != "ok":

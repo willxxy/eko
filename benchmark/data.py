@@ -102,6 +102,11 @@ def prepare_ecg(ecg_dir, ecg_file, destination, leads="12-lead"):
         signal = signal.T
         rate = metadata["fs"]
 
+    rate = int(np.asarray(500 if rate is None else rate).item())
+    if rate != 500:
+        raise ValueError("ECG-Agent's benchmark tools require 500 Hz ECGs")
+    if signal.ndim != 2 or signal.shape[0] != 12:
+        raise ValueError("Expected feats with shape (12, samples) in ECG-Agent lead order")
     measurement_lead = 0 if leads == "single-lead-I" else 1
     if leads != "12-lead":
         # Classifiers expect 12 channels; unavailable leads stay zero.

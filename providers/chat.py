@@ -47,6 +47,8 @@ class ChatCompletions(Conversation):
             "messages": [{"role": "system", "content": system},
                          *map(chat_message, messages)],
             "max_tokens": self.max_tokens,
+            "temperature": 0.0,
+            "top_p": 1.0,
             "stream": True,
             "stream_options": {"include_usage": True},
         }

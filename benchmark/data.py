@@ -9,7 +9,10 @@ LEAD_CONTEXTS = ("12-lead", "single-lead-I", "single-lead-II")
 
 
 def lead_context(dataset, requested=None):
-    return requested or Path(dataset).name.split("-ecg-mtd-dataset")[0]
+    leads = requested or Path(dataset).name.split("-ecg-mtd-dataset")[0]
+    if leads not in LEAD_CONTEXTS:
+        raise ValueError(f"Unknown lead context {leads!r}; specify --leads")
+    return leads
 
 
 def reference_history(dialogue, user_index):
@@ -65,7 +68,9 @@ def reference_responses(dialogue):
 def load_cases(dataset=DATASET, split="test", max_samples=None, leads=None):
     from datasets import load_dataset
 
-    rows = load_dataset(dataset, split=f"{split}[:{max_samples}]" if max_samples else split)
+    rows = load_dataset(dataset, split=split)
+    if max_samples is not None:
+        rows = rows.select(range(min(max_samples, len(rows))))
     leads = lead_context(dataset, leads)
     cases = []
     for row in rows:
@@ -79,13 +84,10 @@ def load_cases(dataset=DATASET, split="test", max_samples=None, leads=None):
     return cases
 
 
-def prepare_ecg(ecg_dir, ecg_file, destination, leads="12-lead"):
-    """Write the selected leads from ECG-Agent's preprocessed MAT file."""
+def prepare_ecg(ecg_dir, ecg_file, destination):
+    """Copy ECG-Agent's 12-lead tool inputs without training labels."""
     import numpy as np
     from scipy.io import loadmat, savemat
-    print(ecg_dir)
-    print(ecg_file)
-
     ecg_dir = Path(ecg_dir).resolve()
     # ECG-Agent preprocessing writes HR25.mat; the dataset names HR00025.mat.
     ecg_id = int(Path(ecg_file).stem.removeprefix("HR"))
@@ -95,19 +97,11 @@ def prepare_ecg(ecg_dir, ecg_file, destination, leads="12-lead"):
     signal = np.asarray(data["feats"])
     rate = data.get("curr_sample_rate")
 
-    rate = int(np.asarray(500 if rate is None else rate).item())
+    rate = float(np.asarray(500 if rate is None else rate).item())
     if rate != 500:
         raise ValueError("ECG-Agent's benchmark tools require 500 Hz ECGs")
-    if signal.ndim != 2 or signal.shape[0] != 12:
+    if signal.ndim != 2 or signal.shape[0] != 12 or not signal.shape[1]:
         raise ValueError("Expected feats with shape (12, samples) in ECG-Agent lead order")
-    measurement_lead = 0 if leads == "single-lead-I" else 1
-    if leads != "12-lead":
-        # Classifiers expect 12 channels; unavailable leads stay zero.
-        masked = np.zeros_like(signal)
-        masked[measurement_lead] = signal[measurement_lead]
-        signal = masked
-    # Exclude training labels.
-    prepared = {"feats": signal, "measurement_lead": measurement_lead, "lead_context": leads}
-    if rate is not None:
-        prepared["curr_sample_rate"] = rate
-    savemat(destination, prepared)
+    if not np.isfinite(signal).all():
+        raise ValueError("ECG contains nonfinite values")
+    savemat(destination, {"feats": signal, "curr_sample_rate": int(rate)})

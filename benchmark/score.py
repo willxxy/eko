@@ -1,17 +1,22 @@
 """Score responses with ECG-Agent's judge prompts."""
 
 import argparse
+from collections import Counter
 import json
 import os
 from pathlib import Path
 import re
 from urllib.request import Request, urlopen
 
+from rich.console import Console
+from rich.progress import track
+
 from .config import parse_args, save_settings
 from .data import append, lead_context, load_cases, read_rows, reference_responses
 from .prompts import direct_prompt, faithfulness_prompt, quality_prompt, tool_prompt
 
 JUDGE = "google/gemini-2.5-pro"
+console = Console(highlight=False)
 
 
 def tasks(cases, responses):
@@ -83,9 +88,10 @@ def summarize(rows):
     summary = {}
     for row in rows:
         group = row.get("category", row["metric"])
-        entry = summary.setdefault(group, {"total": 0, "status_counts": {}, "means": {}})
+        entry = summary.setdefault(group, {"total": 0, "scored": 0, "status_counts": {}, "means": {}})
         entry["total"] += 1
         status = row["status"]
+        entry["scored"] += status == "ok"
         entry["status_counts"][status] = entry["status_counts"].get(status, 0) + 1
         for metric, score in row.get("scores", {}).items():
             entry["means"].setdefault(metric, []).append(score)
@@ -102,6 +108,13 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Save judge prompts without API calls")
     args = parse_args(parser, "score")
     args.leads = lead_context(args.dataset, args.leads)
+    response_config = args.responses.with_suffix(args.responses.suffix + ".config.json")
+    if response_config.exists():
+        settings = json.loads(response_config.read_text())
+        changed = [key for key in ("dataset", "split", "leads", "history")
+                   if settings.get(key) != getattr(args, key)]
+        if changed:
+            parser.error(f"Response settings differ: {', '.join(changed)}")
     save_settings(args.output, {key: value for key, value in vars(args).items()
                                 if key not in ("config", "output", "dry_run")})
     cases = load_cases(args.dataset, args.split, args.max_samples, args.leads)
@@ -110,13 +123,16 @@ def main():
     api_key = None if args.dry_run else os.environ["OPENROUTER_API_KEY"]
     existing = {row["id"]: row for row in read_rows(args.output)} if args.output.exists() else {}
     results = []
+    resumed = 0
+    detailed = args.max_samples is not None
     with args.output.open("a") as stream:
-        for task in planned:
+        for task in track(planned, description="Scoring responses", console=console, disable=detailed):
             previous = existing.get(task["id"])
             if (previous and previous["status"] not in ("judge_error", "pending")
                     and all(previous.get(key) == value for key, value in task.items())
                     and ("prompt" in previous) == ("prompt" in task)):
                 results.append(previous)
+                resumed += 1
                 continue
             row = dict(task)
             if "status" not in row:
@@ -132,18 +148,37 @@ def main():
                         row.update(status="judge_error", error=str(error))
             append(stream, row)
             results.append(row)
-            print(f"{row['id']}: {row['status']}", flush=True)
+            if detailed or row["status"] == "judge_error":
+                scores = ", ".join(f"{key}={value}" for key, value in row.get("scores", {}).items())
+                detail = row.get("error") or scores
+                console.print(f"{row['id']}: {row['status']}" + (f" ({detail})" if detail else ""),
+                              markup=False)
             if row["status"] == "judge_error":
                 break
+    counts = Counter(row["status"] for row in results)
+    skipped = {status: count for status, count in counts.items()
+               if status not in ("ok", "pending", "judge_error")}
     report = {"dataset": args.dataset, "split": args.split, "leads": args.leads,
               "history": args.history, "judge_model": args.judge_model,
               "dialogues_expected": len(cases),
               "dialogues_completed": sum(responses.get(c["case_id"], {}).get("status") == "ok" for c in cases),
               "tasks_expected": len(planned), "tasks_recorded": len(results),
+              "tasks_resumed": resumed, "tasks_unprocessed": len(planned) - len(results),
+              "status_counts": dict(counts), "skipped": skipped,
               "metrics": summarize(results)}
     path = args.output.with_suffix(".summary.json")
     path.write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps(report, indent=2))
+    console.print(f"Tasks: {len(results)}/{len(planned)} recorded, {resumed} reused, "
+                  f"{report['tasks_unprocessed']} not processed.")
+    console.print(f"Scores: {counts['ok']} completed, {counts['judge_error']} failed, "
+                  f"{counts['pending']} pending, {sum(skipped.values())} skipped.")
+    for status, count in sorted(skipped.items()):
+        console.print(f"  {status}: {count}")
+    for group, entry in report["metrics"].items():
+        means = ", ".join(f"{name}={value:.3f}" for name, value in entry["means"].items())
+        console.print(f"{group}: {entry['scored']}/{entry['total']} scored" +
+                      (f"; {means}" if means else ""))
+    console.print(f"Summary: {path}", markup=False)
     if any(row["status"] == "judge_error" for row in results):
         raise SystemExit(1)
 

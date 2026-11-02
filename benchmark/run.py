@@ -1,6 +1,7 @@
 """Run ECG-MTD dialogues through Eko."""
 
 import argparse
+from collections import Counter
 from contextlib import ExitStack
 import json
 import os
@@ -13,13 +14,20 @@ import time
 import eko as core
 import host
 import providers
+from rich.console import Console
+from rich.progress import track
 
 from .config import parse_args, save_settings
 from .data import append, lead_context, load_cases, prepare_ecg, read_rows, reference_history
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTRUCTION = """You are an ECG wearable assistant. Answer the latest question briefly.
-ECG: record.mat. Leads: {leads}; other channels are zero.
+console = Console(highlight=False)
+INSTRUCTION = """You are an ECG wearable assistant. Respond directly to the user's latest
+question without acting like a medical professional. Keep the conversation natural
+and answers concise. Interpret findings when relevant. Explain when a request is
+beyond the tools or requires medical professional consultation. End politely when thanked.
+ECG: record.mat. Dialogue context: {leads}.
+Tools use all 12 leads; measurements use lead II, matching ECG-Agent.
 Use tools for new findings and prior results for follow-ups. Explain tool limitations.
 
 To measure heart rate (bpm), PR interval, QRS duration, and QTc interval (ms):
@@ -34,7 +42,7 @@ from toolbox.neural_networks.classification import ecg_classifier
 print(ecg_classifier('record.mat'))
 ```
 
-Execute tools using Python and print their results before answering.
+When using tools, execute them with Python and print their results before answering.
 End each completed user answer with <done/>.
 
 {history}
@@ -73,7 +81,6 @@ def answer(agent, events, prompt, timeout, max_steps):
         if event.type == "response":
             steps += 1
             text, code = event.value
-            print(event.value)
             if code is None and "<done/>" in text:
                 final = text.replace("<done/>", "").strip()
             elif steps >= max_steps:
@@ -86,6 +93,22 @@ def answer(agent, events, prompt, timeout, max_steps):
                     "steps": steps, "trace": trace}
 
 
+def show_turn(case, turn):
+    console.rule(f"ECG {case['case_id']} · Turn {turn['turn'] + 1}/{len(case['user_turns'])}")
+    console.print("User:", style="bold")
+    console.print(turn["query"], markup=False)
+    for event in turn["trace"]:
+        if event["type"] == "response":
+            console.print("Assistant:", style="bold")
+            console.print(event["text"].replace("<done/>", "").strip(), markup=False)
+        elif event["type"] == "result":
+            console.print(f"Python output (exit {event['returncode']}):", style="bold")
+            console.print(event["output"].strip() or "(no output)", markup=False)
+    if turn["status"] != "ok":
+        console.print(f"Error: {turn['error']}", style="red", markup=False)
+    console.print()
+
+
 def run_session(case, ecg_dir, factory, classifier, args, indices):
     record = {"case_id": case["case_id"], "ecg_file": case["ecg_file"], "turns": []}
     # References and result files are outside the agent workspace.
@@ -94,7 +117,7 @@ def run_session(case, ecg_dir, factory, classifier, args, indices):
         workspace, runtime = directory / "workspace", directory / "runtime"
         workspace.mkdir()
         runtime.mkdir()
-        prepare_ecg(ecg_dir, case["ecg_file"], workspace / "record.mat", case["leads"])
+        prepare_ecg(ecg_dir, case["ecg_file"], workspace / "record.mat")
         shutil.copytree(ROOT / "toolbox", workspace / "toolbox",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         sandbox = args.execution == "sandbox"
@@ -132,8 +155,10 @@ def run_session(case, ecg_dir, factory, classifier, args, indices):
                                             ensure_ascii=False))
                 prompt = INSTRUCTION.format(query=query, leads=case["leads"], history=history)
                 result = answer(agent, events, prompt, args.turn_timeout, args.max_steps)
-                print(result)
-                record["turns"].append({"turn": index, "query": query, **result})
+                turn = {"turn": index, "query": query, **result}
+                record["turns"].append(turn)
+                if args.max_samples is not None:
+                    show_turn(case, turn)
                 if result["status"] != "ok":
                     break
             record["status"] = ("ok" if len(record["turns"]) == len(indices)
@@ -177,10 +202,13 @@ def main():
                         help="Model responses allowed per user turn")
     parser.add_argument("--python-timeout", type=float, default=core.PYTHON_TIMEOUT)
     args = parse_args(parser, "run")
+    if args.turn_timeout <= 0 or args.python_timeout <= 0 or args.max_steps <= 0:
+        parser.error("--turn-timeout, --python-timeout, and --max-steps must be positive")
     args.leads = lead_context(args.dataset, args.leads)
     args.ecg_dir = args.ecg_dir.expanduser().resolve()
-    save_settings(args.output, {key: value for key, value in vars(args).items()
-                                if key not in ("config", "output")})
+    settings = {key: value for key, value in vars(args).items() if key not in ("config", "output")}
+    settings.update(tool_leads="12-lead", measurement_lead="II", temperature=0.0)
+    save_settings(args.output, settings)
     cases = load_cases(args.dataset, args.split, args.max_samples, args.leads)
     previous = {r["case_id"]: r for r in read_rows(args.output)} if args.output.exists() else {}
     factory = providers.factory(args.provider, args.model, args.max_tokens, sglang_url=args.sglang_url)
@@ -189,25 +217,45 @@ def main():
         from toolbox.neural_networks.classification.model import Classifier
 
         classifier = Classifier(args.classifier_checkpoint, args.classifier_device)
-    failed = 0
+    completed = failed = skipped = 0
+    turn_counts = Counter()
+    unattempted = 0
+    detailed = args.max_samples is not None
     with args.output.open("a") as stream:
-        for case in cases:
+        for case in track(cases, description="Generating dialogues", console=console, disable=detailed):
             key = case["case_id"]
             if previous.get(key, {}).get("status") == "ok":
+                skipped += 1
+                if detailed:
+                    console.print(f"ECG {key}: skipped (already complete)", markup=False)
                 continue
             try:
                 record = run_case(case, args.ecg_dir, factory, classifier, args)
-            except (OSError, ValueError) as error:
+            except Exception as error:
                 record = {"case_id": key, "ecg_file": case["ecg_file"],
                           "status": "error", "error": str(error), "turns": []}
             append(stream, record)
+            previous[key] = record
+            completed += record["status"] == "ok"
             failed += record["status"] != "ok"
+            turn_counts.update(turn["status"] for turn in record["turns"])
+            unattempted += len(case["user_turns"]) - len(record["turns"])
             status = record["status"]
             if status == "error":
                 error = next((turn["error"] for turn in record["turns"] if turn.get("error")),
                              record.get("error", "Unknown error"))
                 status += f": {error}"
-            print(f"{key}: {status}", flush=True)
+            if detailed or record["status"] == "error":
+                console.print(f"ECG {key}: {status}", markup=False)
+    report = {"dialogues_expected": len(cases), "completed": completed, "failed": failed,
+              "skipped_complete": skipped, "turns_completed": turn_counts["ok"],
+              "turns_failed": turn_counts["error"], "turns_unattempted": unattempted}
+    path = args.output.with_suffix(".summary.json")
+    path.write_text(json.dumps(report, indent=2) + "\n")
+    console.print(f"Dialogues: {completed} completed, {failed} failed, {skipped} skipped (already complete).")
+    console.print(f"Turns this run: {turn_counts['ok']} completed, {turn_counts['error']} failed, "
+                  f"{unattempted} not attempted.")
+    console.print(f"Summary: {path}", markup=False)
     if failed:
         raise SystemExit(1)
 

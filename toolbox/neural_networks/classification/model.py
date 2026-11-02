@@ -143,24 +143,22 @@ class Classifier:
         state = torch.load(checkpoint.expanduser(), map_location="cpu", weights_only=False)
         cfg = state.get("cfg")
         model_cfg = DEFAULTS | cfg["model"]
-        task = cfg.get("task", {})
-        leads = task.get("leads_to_load")
-        if leads is not None: leads = ast.literal_eval(leads) if isinstance(leads, str) else leads
         num_labels = state["model"]["proj.weight"].shape[0]
         if num_labels != len(CLASS_LABELS):
             raise ValueError(
                 f"ECG-Agent requires {len(CLASS_LABELS)} classifier outputs; "
                 f"checkpoint has {num_labels}")
-        self.sample_rate = task.get("sample_rate") or 500  # Training preprocessing defaults to 500 Hz.
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.model = ECGModel(model_cfg, num_labels)
         self.model.load_state_dict(convert_weights(state["model"], model_cfg["encoder_layers"]), strict=True)
         self.model.to(self.device).eval().requires_grad_(False)
-        print("Classifier Checkpoint Loaded!")
 
     @torch.inference_mode()
     def __call__(self, ecg_path: str | Path) -> dict[str, float]:
         data = loadmat(ecg_path)
+        rate = float(torch.as_tensor(data.get("curr_sample_rate", 500)).item())
+        if rate != 500:
+            raise ValueError("ECG-Agent's classifier requires 500 Hz ECGs")
         signal = torch.as_tensor(data["feats"].copy(), dtype=torch.float32)
         if signal.ndim != 2 or signal.shape[0] != 12:
             raise ValueError(f"Expected (12, samples) in lead order {LEADS}")

@@ -26,10 +26,25 @@ def parse_args(parser, section):
         for action in parser._actions:
             if action.dest in defaults:
                 action.required = False
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.max_samples is not None and args.max_samples <= 0:
+        parser.error("--max-samples must be positive")
+    if args.leads is not None and args.leads not in LEAD_CONTEXTS:
+        parser.error(f"--leads must be one of {', '.join(LEAD_CONTEXTS)}")
+    if args.history not in ("generated", "ground_truth"):
+        parser.error("--history must be generated or ground_truth")
+    return args
 
 
 def save_settings(output, settings):
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.with_suffix(output.suffix + ".config.json").write_text(
-        json.dumps(settings, indent=2, default=str) + "\n")
+    path = output.with_suffix(output.suffix + ".config.json")
+    settings = json.loads(json.dumps(settings, default=str))
+    if output.exists() and output.stat().st_size and path.exists():
+        previous = json.loads(path.read_text())
+        changed = sorted(key for key in previous.keys() | settings.keys()
+                         if key != "max_samples" and previous.get(key) != settings.get(key))
+        if changed:
+            raise ValueError(f"Existing output uses different settings: {', '.join(changed)}. "
+                             "Choose a separate output file.")
+    path.write_text(json.dumps(settings, indent=2) + "\n")

@@ -30,22 +30,23 @@ def median(values: np.ndarray, minimum: float, maximum: float) -> float | None:
     valid = values[np.isfinite(values) & (values >= minimum) & (values <= maximum)]
     return float(np.median(valid)) if valid.size else None
 
-def load_ecg(ecg_path: Path) -> tuple[np.ndarray, int, int]:
-    """Load signal, sample rate, and measurement lead; defaults are 500 Hz and II."""
+def load_ecg(ecg_path: Path) -> tuple[np.ndarray, int]:
+    """Load ECG-Agent's 500 Hz waveform."""
     from scipy.io import loadmat
 
     data = loadmat(ecg_path)
     signal = np.asarray(data["feats"], dtype=float)
-    rate = int(np.asarray(data.get("curr_sample_rate", 500)).item())
-    lead = int(np.asarray(data.get("measurement_lead", 1)).item())
-    return signal, rate, lead
+    rate = float(np.asarray(data.get("curr_sample_rate", 500)).item())
+    if rate != 500:
+        raise ValueError("ECG-Agent's measurement tool requires 500 Hz ECGs")
+    return signal, 500
 
 @cache.cache
 def prepare(ecg_path: str, file_version: tuple, neurokit_version: str) -> ECG:
-    signal, sampling_rate, measurement_lead = load_ecg(Path(ecg_path))
-    lead = signal[measurement_lead]
+    signal, sampling_rate = load_ecg(Path(ecg_path))
+    lead = signal[1]  # ECG-Agent always measures lead II.
     if np.all(lead == 0) or np.all(np.isnan(lead)):
-        raise ValueError(f"Measurement lead {measurement_lead} contains only zeros or NaNs")
+        raise ValueError("Lead II contains only zeros or NaNs")
 
     cleaned = nk.ecg_clean(lead, sampling_rate=sampling_rate, method="neurokit")
     info = nk.ecg_peaks(cleaned, sampling_rate=sampling_rate)[1]

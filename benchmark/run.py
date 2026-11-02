@@ -17,8 +17,7 @@ import providers
 from .data import append, check_run, digest, load_cases, read_rows
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTRUCTION = """You are talking to an ECG wearable device user about record.mat.
-Provide direct answers without acting like a medical professional.
+INSTRUCTION = """You are talking to an ECG wearable device user about an ECG (record.mat).
 Address only the user's latest question; answers should not be too long.
 Keep the conversation natural, as an ECG wearable assistant.
 Use your own responses and findings as conversation history.

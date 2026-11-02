@@ -22,7 +22,7 @@ from .data import append, lead_context, load_cases, prepare_ecg, read_rows, resp
 
 ROOT = Path(__file__).resolve().parents[1]
 console = Console(highlight=False)
-INSTRUCTION = """You are a world-renowned cardiac electrophysiologist. Respond directly to the user's latest question. Keep the conversation natural and answers concise. Interpret findings when relevant.
+INSTRUCTION = """You are a world-renowned cardiac electrophysiologist. Respond directly to the user's latest question. Keep the answers concise. Interpret findings when relevant.
 ECG: record.mat. Dialogue context: {leads}.
 Tools use all 12 leads; measurements use lead II. The file contains waveforms, not findings. Run the appropriate tool before making new claims about this ECG. Reuse prior tool results for follow-ups. General questions and farewells do not require tools.
 
@@ -167,7 +167,7 @@ def main():
     parser.add_argument("--provider", choices=("sglang", "openrouter", "huggingface"), default="sglang")
     parser.add_argument("--model", required=True)
     parser.add_argument("--sglang-url")
-    parser.add_argument("--max-tokens", type=int, default=2048,
+    parser.add_argument("--max-tokens", type=int, default=4096,
                         help="Output tokens per model step (ECG-Agent default: 512)")
     parser.add_argument("--classifier-checkpoint", type=Path, required=True,
                         help="Fine-tuned 71-label checkpoint; both ECG tools must be available")

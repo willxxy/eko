@@ -111,15 +111,13 @@ def validate_cases(cases):
         raise ValueError("Empty benchmark")
 
 
-def load_source(name, split, revision):
+def load_source(name, split):
     if Path(name).is_file():
         return read_rows(name), {"file": str(Path(name).resolve()), "sha256": digest(name)}
-    if not revision:
-        raise ValueError("Remote datasets require --revision (use a commit SHA)")
     from datasets import load_dataset
 
-    dataset = load_dataset(name, split=split, revision=revision)
-    return dataset, {"dataset": name, "split": split, "revision": revision,
+    dataset = load_dataset(name, split=split)
+    return dataset, {"dataset": name, "split": split,
                      "fingerprint": dataset._fingerprint}
 
 
@@ -127,7 +125,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, help="HF dataset ID or local JSON/JSONL export")
     parser.add_argument("--split", default="test")
-    parser.add_argument("--revision")
     parser.add_argument("--reference", help="Optional separate reference dataset/export")
     parser.add_argument("--reference-split", default="train")
     parser.add_argument("--reference-revision")
@@ -137,7 +134,7 @@ def main():
     args = parser.parse_args()
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
-    rows, source = load_source(args.dataset, args.split, args.revision)
+    rows, source = load_source(args.dataset, args.split)
     references = {}
     if args.reference:
         reference_rows, source["reference"] = load_source(

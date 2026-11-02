@@ -195,7 +195,7 @@ def main():
     parser.add_argument("--provider", choices=("sglang", "openrouter", "huggingface"), default="sglang")
     parser.add_argument("--model", required=True)
     parser.add_argument("--sglang-url")
-    parser.add_argument("--max-tokens", type=int, default=512,
+    parser.add_argument("--max-tokens", type=int, default=2048,
                         help="Output tokens per model step (ECG-Agent default: 512)")
     parser.add_argument("--classifier-checkpoint", type=Path, required=True,
                         help="Fine-tuned 71-label checkpoint; both ECG tools must be available")

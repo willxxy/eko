@@ -1,8 +1,8 @@
-"""Replay ECG-MTD user turns through Eko's normal Python execution loop."""
+"""Run ECG-MTD dialogues through Eko."""
 
 import argparse
 from contextlib import ExitStack
-import math
+import json
 import os
 from pathlib import Path
 import queue
@@ -14,30 +14,36 @@ import eko as core
 import host
 import providers
 
-from .data import DATASET, append, load_cases, prepare_ecg, read_rows
+from .config import parse_args, save_settings
+from .data import append, lead_context, load_cases, prepare_ecg, read_rows, reference_history
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTRUCTION = """You are an ECG wearable assistant helping a user understand their ECG in record.mat.
-Answer the user's latest question directly, briefly, and in natural language.
-Speak as a wearable assistant without presenting yourself as a medical professional.
-
-When a question needs new ECG findings, run the appropriate tool and explain its results.
-For follow-up questions, use your previous responses and findings; call a tool again only if needed.
-If the available tools cannot answer the question, explain the limitation.
-Acknowledge thanks and goodbyes naturally.
+INSTRUCTION = """You are an ECG wearable assistant. Answer the latest question briefly.
+ECG: record.mat. Leads: {leads}; other channels are zero.
+Use tools for new findings and prior results for follow-ups. Explain tool limitations.
 
 To measure heart rate (bpm), PR interval, QRS duration, and QTc interval (ms):
+```python-run
 from toolbox.measurements.ecg_analysis import ecg_analysis
 print(ecg_analysis('record.mat'))
-{classification}
+```
+
+To classify ECG findings:
+```python-run
+from toolbox.neural_networks.classification import ecg_classifier
+print(ecg_classifier('record.mat'))
+```
+Classification: {classification_status}. Call only when available.
+
 Execute tools using Python and print their results before answering.
 End each completed user answer with <done/>.
 
+{history}
 User: {query}"""
 
 
 def answer(agent, events, prompt, timeout, max_steps):
-    """Wait for completion, keeping observable execution separate from the answer."""
+    """Collect one answer and its execution trace."""
     agent.send(prompt)
     deadline = time.monotonic() + timeout
     trace = []
@@ -80,7 +86,7 @@ def answer(agent, events, prompt, timeout, max_steps):
                     "steps": steps, "trace": trace}
 
 
-def run_case(case, ecg_dir, factory, classifier, args):
+def run_session(case, ecg_dir, factory, classifier, args, indices):
     record = {"case_id": case["case_id"], "ecg_file": case["ecg_file"], "turns": []}
     # References and result files are outside the agent workspace.
     with tempfile.TemporaryDirectory(prefix="eko-bench-", dir="/tmp") as directory, ExitStack() as resources:
@@ -88,7 +94,7 @@ def run_case(case, ecg_dir, factory, classifier, args):
         workspace, runtime = directory / "workspace", directory / "runtime"
         workspace.mkdir()
         runtime.mkdir()
-        prepare_ecg(ecg_dir, case["ecg_file"], workspace / "record.mat")
+        prepare_ecg(ecg_dir, case["ecg_file"], workspace / "record.mat", case["leads"])
         shutil.copytree(ROOT / "toolbox", workspace / "toolbox",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         sandbox = args.execution == "sandbox"
@@ -117,34 +123,46 @@ def run_case(case, ecg_dir, factory, classifier, args):
         try:
             if not agent.ready.wait(10) or agent.proc.poll() is not None:
                 raise RuntimeError(agent.startup_error())
-            for index, query in enumerate(case["user_turns"]):
-                prompt = query
-                if index == 0:
-                    classification = (
-                        "To identify arrhythmias, abnormalities, and other ECG findings:\n"
-                        "from toolbox.neural_networks.classification import ecg_classifier\n"
-                        "print(ecg_classifier('record.mat'))"
-                        if classifier is not None else "No classification checkpoint is loaded.")
-                    prompt = INSTRUCTION.format(classification=classification, query=query)
-                try:
-                    result = answer(agent, events, prompt, args.turn_timeout, args.max_steps)
-                except (TimeoutError, RuntimeError) as error:
-                    result = {"status": "error", "error": str(error)}
+            classification_status = ("available" if classifier is not None else
+                                     "unavailable because no checkpoint is loaded")
+            for index in indices:
+                query = case["user_turns"][index]
+                history = ""
+                if args.history == "ground_truth" and index:
+                    history = ("Previous reference conversation (before the current question):\n"
+                               + json.dumps(reference_history(case["reference_dialogue"], index),
+                                            ensure_ascii=False))
+                prompt = INSTRUCTION.format(classification_status=classification_status, query=query,
+                                            leads=case["leads"], history=history)
+                result = answer(agent, events, prompt, args.turn_timeout, args.max_steps)
                 record["turns"].append({"turn": index, "query": query, **result})
                 if result["status"] != "ok":
                     break
-            record["status"] = ("ok" if len(record["turns"]) == len(case["user_turns"])
+            record["status"] = ("ok" if len(record["turns"]) == len(indices)
                                 and all(t["status"] == "ok" for t in record["turns"]) else "error")
         except (OSError, RuntimeError) as error:
             record.update(status="error", error=str(error))
     return record
 
 
+def run_case(case, ecg_dir, factory, classifier, args):
+    indices = range(len(case["user_turns"]))
+    if args.history == "generated":
+        return run_session(case, ecg_dir, factory, classifier, args, indices)
+    record = {"case_id": case["case_id"], "ecg_file": case["ecg_file"],
+              "turns": [], "status": "ok"}
+    for index in indices:
+        # A fresh agent and workspace prevent generated answers or files carrying over.
+        result = run_session(case, ecg_dir, factory, classifier, args, (index,))
+        record["turns"].extend(result["turns"])
+        if result["status"] != "ok":
+            record.update(status="error", error=result.get("error", "User turn failed"))
+            break
+    return record
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default=DATASET, help="Hugging Face dataset ID or local dataset directory")
-    parser.add_argument("--split", default="test")
-    parser.add_argument("--max-samples", type=int)
     parser.add_argument("--ecg-dir", required=True, type=Path,
                         help="PTB-XL root, records500 directory, or ECG-Agent's prepared MAT directory")
     parser.add_argument("--output", required=True, type=Path)
@@ -160,16 +178,12 @@ def main():
     parser.add_argument("--max-steps", type=int, default=20,
                         help="Model responses allowed per user turn")
     parser.add_argument("--python-timeout", type=float, default=core.PYTHON_TIMEOUT)
-    args = parser.parse_args()
-    if min(args.turn_timeout, args.max_steps, args.python_timeout, args.max_tokens) <= 0:
-        parser.error("Timeouts and limits must be positive")
-    if not all(math.isfinite(value) for value in (args.turn_timeout, args.python_timeout)):
-        parser.error("Timeouts must be finite")
-    if args.execution == "sandbox" and not shutil.which("bwrap"):
-        parser.error("Sandbox execution requires Linux Bubblewrap; local execution uses --execution local")
-    cases = load_cases(args.dataset, args.split, args.max_samples)
-    ecg_dir = args.ecg_dir.expanduser().resolve(strict=True)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args = parse_args(parser, "run")
+    args.leads = lead_context(args.dataset, args.leads)
+    args.ecg_dir = args.ecg_dir.expanduser().resolve()
+    save_settings(args.output, {key: value for key, value in vars(args).items()
+                                if key not in ("config", "output")})
+    cases = load_cases(args.dataset, args.split, args.max_samples, args.leads)
     previous = {r["case_id"]: r for r in read_rows(args.output)} if args.output.exists() else {}
     factory = providers.factory(args.provider, args.model, args.max_tokens, sglang_url=args.sglang_url)
     classifier = None
@@ -184,7 +198,7 @@ def main():
             if previous.get(key, {}).get("status") == "ok":
                 continue
             try:
-                record = run_case(case, ecg_dir, factory, classifier, args)
+                record = run_case(case, args.ecg_dir, factory, classifier, args)
             except (OSError, ValueError) as error:
                 record = {"case_id": key, "ecg_file": case["ecg_file"],
                           "status": "error", "error": str(error), "turns": []}

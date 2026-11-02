@@ -1,11 +1,30 @@
-"""Load ECG-MTD dialogues and prepare ECG-Agent's local ECG files."""
+"""ECG-MTD dialogues and PTB-XL waveforms."""
 
 import json
 import os
 from pathlib import Path
-import shutil
 
 DATASET = "gustmd0121/12-lead-ecg-mtd-dataset"
+LEAD_CONTEXTS = ("12-lead", "single-lead-I", "single-lead-II")
+
+
+def lead_context(dataset, requested=None):
+    return requested or Path(dataset).name.split("-ecg-mtd-dataset")[0]
+
+
+def reference_history(dialogue, user_index):
+    """Reference turns before the selected user turn."""
+    history = []
+    position = -1
+    for turn in dialogue:
+        if turn["role"] == "user":
+            position += 1
+        if position >= user_index:
+            break
+        entry = {key: turn[key] for key in ("role", "action", "content", "tool_output")
+                 if key in turn}
+        history.append(entry)
+    return history
 
 
 def read_rows(path):
@@ -20,7 +39,7 @@ def append(stream, row):
 
 
 def reference_responses(dialogue):
-    """ECG-Agent-Play categories, keyed by user-turn position to retain repeats."""
+    """ECG-Agent response categories by user-turn position."""
     responses = []
     user_index = -1
     for index, turn in enumerate(dialogue):
@@ -43,17 +62,16 @@ def reference_responses(dialogue):
     return responses
 
 
-def load_cases(dataset=DATASET, split="test", max_samples=None):
+def load_cases(dataset=DATASET, split="test", max_samples=None, leads=None):
     from datasets import load_dataset
 
-    if max_samples is not None and max_samples <= 0:
-        raise ValueError("max_samples must be positive")
     rows = load_dataset(dataset, split=f"{split}[:{max_samples}]" if max_samples else split)
+    leads = lead_context(dataset, leads)
     cases = []
     for row in rows:
         metadata = json.loads(row["metadata"])
         dialogue = json.loads(row["dialogue"])
-        cases.append({"case_id": str(metadata["ecg_id"]),
+        cases.append({"case_id": str(metadata["ecg_id"]), "leads": leads,
                       "ecg_file": json.loads(row["ecg_files"])[0],
                       "cefr_level": metadata["cefr_level"],
                       "user_turns": [turn["content"] for turn in dialogue if turn["role"] == "user"],
@@ -61,25 +79,37 @@ def load_cases(dataset=DATASET, split="test", max_samples=None):
     return cases
 
 
-def prepare_ecg(ecg_dir, ecg_file, destination):
-    """Reuse ECG-Agent MAT files, or prepare a raw PTB-XL record the same way."""
+def prepare_ecg(ecg_dir, ecg_file, destination, leads="12-lead"):
+    """Write the selected leads from a MAT or PTB-XL record."""
+    import numpy as np
+    from scipy.io import loadmat, savemat
+
+    ecg_dir = Path(ecg_dir).resolve()
     source = (ecg_dir / ecg_file).resolve()
     source.relative_to(ecg_dir)
     if source.is_file():
-        shutil.copyfile(source, destination)
-        return
+        data = loadmat(source)
+        signal = np.asarray(data["feats"])
+        rate = data.get("curr_sample_rate")
+    else:
+        import wfdb
 
-    import numpy as np
-    from scipy.io import savemat
-    import wfdb
+        ecg_id = int(Path(ecg_file).stem.removeprefix("HR"))
+        folder = f"{ecg_id // 1000 * 1000:05d}"
+        records = ecg_dir / "records500" if (ecg_dir / "records500").is_dir() else ecg_dir
+        record = records / folder / f"{ecg_id:05d}_hr"
+        signal, metadata = wfdb.rdsamp(str(record))
+        signal = signal.T
+        rate = metadata["fs"]
 
-    # PTB-XL's records500 layout; ECG-Agent names its prepared files HR<id>.mat.
-    ecg_id = int(Path(ecg_file).stem.removeprefix("HR"))
-    folder = f"{ecg_id // 1000 * 1000:05d}"
-    records = ecg_dir / "records500" if (ecg_dir / "records500").is_dir() else ecg_dir
-    record = records / folder / f"{ecg_id:05d}_hr"
-    signal, metadata = wfdb.rdsamp(str(record))
-    if metadata["fs"] != 500 or signal.shape[1] != 12 or np.isnan(signal).any():
-        raise ValueError(f"Expected a 500 Hz, 12-lead ECG without NaNs: {record}")
-    # Match src/preprocess/preprocess_ptbxl.py: transpose, keep all leads, no scaling.
-    savemat(destination, {"feats": signal.T, "curr_sample_rate": metadata["fs"]})
+    measurement_lead = 0 if leads == "single-lead-I" else 1
+    if leads != "12-lead":
+        # Classifiers expect 12 channels; unavailable leads stay zero.
+        masked = np.zeros_like(signal)
+        masked[measurement_lead] = signal[measurement_lead]
+        signal = masked
+    # Exclude training labels.
+    prepared = {"feats": signal, "measurement_lead": measurement_lead, "lead_context": leads}
+    if rate is not None:
+        prepared["curr_sample_rate"] = rate
+    savemat(destination, prepared)

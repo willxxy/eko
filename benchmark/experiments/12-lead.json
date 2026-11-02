@@ -1,0 +1,13 @@
+{
+  "dataset": "gustmd0121/12-lead-ecg-mtd-dataset",
+  "split": "test",
+  "leads": "12-lead",
+  "history": "generated",
+  "run": {
+    "output": "benchmark-results/12-lead/responses.jsonl"
+  },
+  "score": {
+    "responses": "benchmark-results/12-lead/responses.jsonl",
+    "output": "benchmark-results/12-lead/scores.jsonl"
+  }
+}

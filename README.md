@@ -80,6 +80,36 @@ uv run python host.py --provider sglang \
 
 For all current measurements in `toolbox/measurements/`, we follow [ECG-Agent](https://github.com/gustmd0121/ECG-Agent) exactly in calculating them. We also maintain the exact tools used in ECG-Agent, and shown to the LLM.
 
-### Notes
-- ECG-Agent seems to use all four measurements?
-- The flow of the tool choosing is not implemented yet. Subsequently, I found creating the evaluation pipeline to match ECG-Agent not totally obvious. We should think of a way to adapt our agentic pipeline to the evaluation framework of ECG-Agent. I will come back to this soon.
+## Benchmark experiments
+
+Twelve configs in `benchmark/experiments/`: [six datasets](https://huggingface.co/gustmd0121/datasets)
+× generated or ground truth history. Each has separate outputs.
+
+```bash
+uv sync --extra benchmark
+
+uv run python -m benchmark.run \
+  --config benchmark/experiments/single-lead-I-gt-reference-history.json \
+  --ecg-dir /path/to/ptb-xl \
+  --model Qwen/Qwen3.8-27B \
+  --sglang-url http://127.0.0.1:30001 \
+  --classifier-checkpoint /path/to/checkpoint.pt
+
+uv run python -m benchmark.score \
+  --config benchmark/experiments/single-lead-I-gt-reference-history.json
+```
+
+Shared keys: `dataset`, `split`, `max_samples`, `leads`, `history`.
+`run` and `score` hold command options using underscores. CLI overrides JSON;
+paths are relative to the working directory. Use separate outputs when changing settings.
+
+`generated` keeps model history. `ground_truth` uses a fresh agent per turn with
+prior reference messages and tool outputs. The current reference answer is excluded.
+Both modes receive tool examples every turn and execute tools for new findings.
+
+Input: full 12-lead MAT or PTB-XL `records500` files. Single-lead runs zero other
+channels; measurements use I for single-lead-I, II otherwise. Classifier accuracy
+on masked inputs requires validation. Classification requires a checkpoint.
+
+Scoring requires `OPENROUTER_API_KEY`; `--dry-run` saves prompts only.
+Execution defaults to Linux Bubblewrap; use `--execution local` to run locally.

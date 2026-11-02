@@ -1,18 +1,17 @@
-"""Score saved responses through OpenRouter with ECG-Agent-Play's judge prompts."""
+"""Score responses with ECG-Agent's judge prompts."""
 
 import argparse
 import json
 import os
 from pathlib import Path
 import re
-import time
-from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .data import DATASET, append, load_cases, read_rows, reference_responses
+from .config import parse_args, save_settings
+from .data import append, lead_context, load_cases, read_rows, reference_responses
 from .prompts import direct_prompt, faithfulness_prompt, quality_prompt, tool_prompt
 
-JUDGE = "google/gemini-2.5-pro"  # Same judge model as ECG-Agent-Play.
+JUDGE = "google/gemini-2.5-pro"
 
 
 def tasks(cases, responses):
@@ -20,13 +19,6 @@ def tasks(cases, responses):
         key = case["case_id"]
         record = responses.get(key, {})
         turns = {turn["turn"]: turn for turn in record.get("turns", [])}
-        if len(turns) != len(record.get("turns", [])):
-            raise ValueError(f"Duplicate user turn for {key}")
-        for index, turn in turns.items():
-            if not 0 <= index < len(case["user_turns"]) or turn["query"] != case["user_turns"][index]:
-                raise ValueError(f"User turn mismatch for {key}:{index}")
-            if turn.get("status") == "ok" and not turn.get("response", "").strip():
-                raise ValueError(f"Empty completed response for {key}:{index}")
         for reference in reference_responses(case["reference_dialogue"]):
             index, category = reference["turn"], reference["category"]
             turn = turns.get(index, {})
@@ -64,47 +56,25 @@ def tasks(cases, responses):
 
 
 def judge(prompt, model, api_key):
-    # OpenRouter controls routing and provider safety defaults.
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}],
                "stream": False}
     request = Request(
         "https://openrouter.ai/api/v1/chat/completions",
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
-    for attempt in range(3):
-        try:
-            with urlopen(request, timeout=300) as response:
-                result = json.load(response)
-            if result.get("error"):
-                raise RuntimeError(f"OpenRouter: {result['error']}")
-            choices = result.get("choices", [])
-            if not choices or choices[0].get("finish_reason") != "stop":
-                raise ValueError(f"Judge did not finish: {result}")
-            text = choices[0].get("message", {}).get("content")
-            if not isinstance(text, str) or not text.strip():
-                raise ValueError("Judge returned no text")
-            return text
-        except HTTPError as error:
-            if attempt == 2 or error.code not in (429, 500, 502, 503, 504):
-                raise RuntimeError(f"Judge HTTP {error.code}: {error.read().decode()}") from error
-        except (URLError, TimeoutError):
-            if attempt == 2:
-                raise
-        time.sleep(2 ** attempt)
+    with urlopen(request, timeout=300) as response:
+        choice = json.load(response)["choices"][0]
+    return choice["message"]["content"] if choice["finish_reason"] == "stop" else ""
 
 
 def parse_scores(text, metric):
     if metric == "faithfulness":
-        if text.strip() not in ("0", "1"):
-            raise ValueError("Expected a single faithfulness score, 0 or 1")
-        return {"faithfulness": int(text.strip())}
+        return {"faithfulness": int(re.fullmatch("[01]", text.strip())[0])}
     labels = ({"accuracy": "Accuracy", "completeness": "Completeness"} if metric == "response"
               else {"naturalness": "Naturalness Score", "cefr_adherence": "CEFR Adherence Score"})
     scores = {}
     for name, label in labels.items():
         match = re.search(rf"^{label}:\s*([1-5])\s*$", text, re.MULTILINE | re.IGNORECASE)
-        if match is None:
-            raise ValueError(f"Missing or invalid {name} score")
         scores[name] = int(match[1])
     return scores
 
@@ -126,32 +96,26 @@ def summarize(rows):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default=DATASET, help="Hugging Face dataset ID or local dataset directory")
-    parser.add_argument("--split", default="test")
-    parser.add_argument("--max-samples", type=int)
     parser.add_argument("--responses", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--judge-model", default=JUDGE)
     parser.add_argument("--dry-run", action="store_true", help="Save judge prompts without API calls")
-    args = parser.parse_args()
-    cases = load_cases(args.dataset, args.split, args.max_samples)
+    args = parse_args(parser, "score")
+    args.leads = lead_context(args.dataset, args.leads)
+    save_settings(args.output, {key: value for key, value in vars(args).items()
+                                if key not in ("config", "output", "dry_run")})
+    cases = load_cases(args.dataset, args.split, args.max_samples, args.leads)
     responses = {row["case_id"]: row for row in read_rows(args.responses)}
-    if responses.keys() - {case["case_id"] for case in cases}:
-        parser.error("Response IDs are absent from the selected dataset")
     planned = list(tasks(cases, responses))
-    ids = [task["id"] for task in planned]
-    if len(set(ids)) != len(ids):
-        parser.error("Multiple reference responses for the same user turn")
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not args.dry_run and not api_key:
-        parser.error("Set OPENROUTER_API_KEY")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+    api_key = None if args.dry_run else os.environ["OPENROUTER_API_KEY"]
     existing = {row["id"]: row for row in read_rows(args.output)} if args.output.exists() else {}
     results = []
     with args.output.open("a") as stream:
         for task in planned:
             previous = existing.get(task["id"])
-            if previous and previous["status"] not in ("judge_error", "pending"):
+            if (previous and previous["status"] not in ("judge_error", "pending")
+                    and all(previous.get(key) == value for key, value in task.items())
+                    and ("prompt" in previous) == ("prompt" in task)):
                 results.append(previous)
                 continue
             row = dict(task)
@@ -164,15 +128,16 @@ def main():
                         row["raw_response"] = judge(row["prompt"], args.judge_model, api_key)
                         row["scores"] = parse_scores(row["raw_response"], row["metric"])
                         row["status"] = "ok"
-                    except (OSError, RuntimeError, ValueError) as error:
+                    except Exception as error:
                         row.update(status="judge_error", error=str(error))
             append(stream, row)
             results.append(row)
             print(f"{row['id']}: {row['status']}", flush=True)
             if row["status"] == "judge_error":
-                # Save progress and stop; rerunning retries this task without repeating successes.
                 break
-    report = {"dialogues_expected": len(cases),
+    report = {"dataset": args.dataset, "split": args.split, "leads": args.leads,
+              "history": args.history, "judge_model": args.judge_model,
+              "dialogues_expected": len(cases),
               "dialogues_completed": sum(responses.get(c["case_id"], {}).get("status") == "ok" for c in cases),
               "tasks_expected": len(planned), "tasks_recorded": len(results),
               "metrics": summarize(results)}

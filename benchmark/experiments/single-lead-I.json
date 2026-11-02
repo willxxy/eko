@@ -1,0 +1,13 @@
+{
+  "dataset": "gustmd0121/single-lead-I-ecg-mtd-dataset",
+  "split": "test",
+  "leads": "single-lead-I",
+  "history": "generated",
+  "run": {
+    "output": "benchmark-results/single-lead-I/responses.jsonl"
+  },
+  "score": {
+    "responses": "benchmark-results/single-lead-I/responses.jsonl",
+    "output": "benchmark-results/single-lead-I/scores.jsonl"
+  }
+}

@@ -5,14 +5,8 @@ import socket
 
 
 def ecg_classifier(ecg_path: str) -> list[str]:
-    """Classify a training-preprocessed 12-lead .mat in the agent's workspace.
-
-    Returns ECG-Agent evaluation findings above 0.5, sorted by probability and
-    formatted as "LABEL (percentage)". Requires host.py --classifier-checkpoint.
-    """
-    endpoint = os.environ.get("EKO_CLASSIFIER")
-    if not endpoint:
-        raise RuntimeError("Start host.py with --classifier-checkpoint")
+    """Return findings above 0.5, sorted by probability, as 'LABEL (percentage)'."""
+    endpoint = os.environ["EKO_CLASSIFIER"]
     request = {"ecg_path": str(Path(ecg_path).expanduser().resolve())}
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(float(os.environ.get("EKO_PYTHON_TIMEOUT", "30")))

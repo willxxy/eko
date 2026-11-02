@@ -89,18 +89,42 @@ def judge(prompt, model, api_key):
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
     with urlopen(request, timeout=300) as response:
-        choice = json.load(response)["choices"][0]
-    return choice["message"]["content"] if choice["finish_reason"] == "stop" else ""
+        return json.load(response)
+
+
+def judge_text(response):
+    if not isinstance(response, dict):
+        raise ValueError("Judge response must be a JSON object")
+    if response.get("error"):
+        raise RuntimeError(f"OpenRouter judge error: {response['error']}")
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ValueError("Judge returned no completion choice")
+    choice = choices[0]
+    finish = choice.get("finish_reason")
+    if finish != "stop":
+        raise RuntimeError(f"Judge completion ended with finish_reason={finish!r}")
+    message = choice.get("message")
+    text = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Judge returned no text")
+    return text
 
 
 def parse_scores(text, metric):
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)
     if metric == "faithfulness":
-        return {"faithfulness": int(re.fullmatch("[01]", text.strip())[0])}
+        match = re.fullmatch("[01]", text.strip())
+        if match is None:
+            raise ValueError("Judge faithfulness score must be 0 or 1")
+        return {"faithfulness": int(match[0])}
     labels = ({"accuracy": "Accuracy", "completeness": "Completeness"} if metric == "response"
               else {"naturalness": "Naturalness Score", "cefr_adherence": "CEFR Adherence Score"})
     scores = {}
     for name, label in labels.items():
         match = re.search(rf"^{label}:\s*([1-5])\s*$", text, re.MULTILINE | re.IGNORECASE)
+        if match is None:
+            raise ValueError(f"Judge response must contain '{label}: <1-5>'")
         scores[name] = int(match[1])
     return scores
 
@@ -113,12 +137,16 @@ def score(task, model, api_key, dry_run):
         row["status"] = "pending"
         return row
     row["raw_response"] = ""
+    response = None
     try:
-        row["raw_response"] = judge(row["prompt"], model, api_key)
+        response = judge(row["prompt"], model, api_key)
+        row["raw_response"] = judge_text(response)
         row["scores"] = parse_scores(row["raw_response"], row["metric"])
         row["status"] = "ok"
     except Exception as error:
         row.update(status="judge_error", error=str(error))
+        if response is not None:
+            row["judge_response"] = response
     return row
 
 

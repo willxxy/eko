@@ -73,6 +73,7 @@ def answer(agent, events, prompt, timeout, max_steps):
         if event.type == "response":
             steps += 1
             text, code = event.value
+            print(event.value)
             if code is None and "<done/>" in text:
                 final = text.replace("<done/>", "").strip()
             elif steps >= max_steps:
@@ -131,6 +132,7 @@ def run_session(case, ecg_dir, factory, classifier, args, indices):
                                             ensure_ascii=False))
                 prompt = INSTRUCTION.format(query=query, leads=case["leads"], history=history)
                 result = answer(agent, events, prompt, args.turn_timeout, args.max_steps)
+                print(result)
                 record["turns"].append({"turn": index, "query": query, **result})
                 if result["status"] != "ok":
                     break

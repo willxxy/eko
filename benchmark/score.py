@@ -9,7 +9,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .data import append, check_run, digest, load_cases, read_rows, reference_responses
+from .data import DATASET, append, load_cases, read_rows, reference_responses
 from .prompts import direct_prompt, faithfulness_prompt, quality_prompt, tool_prompt
 
 JUDGE = "google/gemini-2.5-pro"  # Same judge model as ECG-Agent-Play.
@@ -126,16 +126,18 @@ def summarize(rows):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cases", required=True, type=Path)
+    parser.add_argument("--dataset", default=DATASET, help="Hugging Face dataset ID or local dataset directory")
+    parser.add_argument("--split", default="test")
+    parser.add_argument("--max-samples", type=int)
     parser.add_argument("--responses", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--judge-model", default=JUDGE)
     parser.add_argument("--dry-run", action="store_true", help="Save judge prompts without API calls")
     args = parser.parse_args()
-    cases = load_cases(args.cases)
+    cases = load_cases(args.dataset, args.split, args.max_samples)
     responses = {row["case_id"]: row for row in read_rows(args.responses)}
     if responses.keys() - {case["case_id"] for case in cases}:
-        parser.error("Response IDs are absent from the frozen cases")
+        parser.error("Response IDs are absent from the selected dataset")
     planned = list(tasks(cases, responses))
     ids = [task["id"] for task in planned]
     if len(set(ids)) != len(ids):
@@ -143,17 +145,13 @@ def main():
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not args.dry_run and not api_key:
         parser.error("Set OPENROUTER_API_KEY")
-    config = {"cases_sha256": digest(args.cases), "responses_sha256": digest(args.responses),
-              "judge_provider": "openrouter", "judge_model": args.judge_model, "dry_run": args.dry_run,
-              "code_sha256": {name: digest(Path(__file__).with_name(name))
-                              for name in ("score.py", "prompts.py", "data.py")}}
-    check_run(args.output, config)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     existing = {row["id"]: row for row in read_rows(args.output)} if args.output.exists() else {}
     results = []
     with args.output.open("a") as stream:
         for task in planned:
             previous = existing.get(task["id"])
-            if previous and previous["status"] != "judge_error":
+            if previous and previous["status"] not in ("judge_error", "pending"):
                 results.append(previous)
                 continue
             row = dict(task)

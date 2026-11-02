@@ -14,20 +14,23 @@ import eko as core
 import host
 import providers
 
-from .data import append, check_run, digest, load_cases, read_rows
+from .data import DATASET, append, load_cases, prepare_ecg, read_rows
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTRUCTION = """You are talking to an ECG wearable device user about an ECG (record.mat).
-Address only the user's latest question; answers should not be too long.
-Keep the conversation natural, as an ECG wearable assistant.
-Use your own responses and findings as conversation history.
-The ECG contains training-preprocessed feats (leads, samples) and curr_sample_rate.
-Lead order is I, II, III, aVR, aVL, aVF, V1-V6.
-Available measurement tool (heart rate in bpm; PR, QRS, QTc in ms):
+INSTRUCTION = """You are an ECG wearable assistant helping a user understand their ECG in record.mat.
+Answer the user's latest question directly, briefly, and in natural language.
+Speak as a wearable assistant without presenting yourself as a medical professional.
+
+When a question needs new ECG findings, run the appropriate tool and explain its results.
+For follow-up questions, use your previous responses and findings; call a tool again only if needed.
+If the available tools cannot answer the question, explain the limitation.
+Acknowledge thanks and goodbyes naturally.
+
+To measure heart rate (bpm), PR interval, QRS duration, and QTc interval (ms):
 from toolbox.measurements.ecg_analysis import ecg_analysis
 print(ecg_analysis('record.mat'))
 {classification}
-Choose and execute any needed Python yourself. Print findings you use in your answer.
+Execute tools using Python and print their results before answering.
 End each completed user answer with <done/>.
 
 User: {query}"""
@@ -77,7 +80,7 @@ def answer(agent, events, prompt, timeout, max_steps):
                     "steps": steps, "trace": trace}
 
 
-def run_case(case, ecg_path, factory, classifier, args):
+def run_case(case, ecg_dir, factory, classifier, args):
     record = {"case_id": case["case_id"], "ecg_file": case["ecg_file"], "turns": []}
     # References and result files are outside the agent workspace.
     with tempfile.TemporaryDirectory(prefix="eko-bench-", dir="/tmp") as directory, ExitStack() as resources:
@@ -85,7 +88,7 @@ def run_case(case, ecg_path, factory, classifier, args):
         workspace, runtime = directory / "workspace", directory / "runtime"
         workspace.mkdir()
         runtime.mkdir()
-        shutil.copyfile(ecg_path, workspace / "record.mat")
+        prepare_ecg(ecg_dir, case["ecg_file"], workspace / "record.mat")
         shutil.copytree(ROOT / "toolbox", workspace / "toolbox",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         sandbox = args.execution == "sandbox"
@@ -118,8 +121,9 @@ def run_case(case, ecg_path, factory, classifier, args):
                 prompt = query
                 if index == 0:
                     classification = (
-                        "Classification tool: from toolbox.neural_networks.classification "
-                        "import ecg_classifier; print(ecg_classifier('record.mat'))"
+                        "To identify arrhythmias, abnormalities, and other ECG findings:\n"
+                        "from toolbox.neural_networks.classification import ecg_classifier\n"
+                        "print(ecg_classifier('record.mat'))"
                         if classifier is not None else "No classification checkpoint is loaded.")
                     prompt = INSTRUCTION.format(classification=classification, query=query)
                 try:
@@ -138,8 +142,11 @@ def run_case(case, ecg_path, factory, classifier, args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cases", required=True, type=Path)
-    parser.add_argument("--ecg-dir", required=True, type=Path)
+    parser.add_argument("--dataset", default=DATASET, help="Hugging Face dataset ID or local dataset directory")
+    parser.add_argument("--split", default="test")
+    parser.add_argument("--max-samples", type=int)
+    parser.add_argument("--ecg-dir", required=True, type=Path,
+                        help="PTB-XL root, records500 directory, or ECG-Agent's prepared MAT directory")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--provider", choices=("sglang", "openrouter", "huggingface"), default="sglang")
     parser.add_argument("--model", required=True)
@@ -160,24 +167,9 @@ def main():
         parser.error("Timeouts must be finite")
     if args.execution == "sandbox" and not shutil.which("bwrap"):
         parser.error("Sandbox execution requires Linux Bubblewrap; local execution uses --execution local")
-    cases = load_cases(args.cases)
-    ecg_dir = args.ecg_dir.resolve()
-    paths = {}
-    for case in cases:
-        path = (ecg_dir / case["ecg_file"]).resolve(strict=True)
-        path.relative_to(ecg_dir)
-        paths[case["case_id"]] = path
-    config = {key: str(value) if isinstance(value, Path) else value
-              for key, value in vars(args).items() if key != "output"}
-    config["cases_sha256"] = digest(args.cases)
-    config["ecg_sha256"] = {key: digest(path) for key, path in paths.items()}
-    sources = [ROOT / "eko.py", ROOT / "host.py", Path(__file__), ROOT / "benchmark/data.py",
-               *sorted((ROOT / "providers").glob("*.py")),
-               *sorted((ROOT / "toolbox").rglob("*.py"))]
-    config["code_sha256"] = {str(p.relative_to(ROOT)): digest(p) for p in sources}
-    if args.classifier_checkpoint:
-        config["checkpoint_sha256"] = digest(args.classifier_checkpoint)
-    check_run(args.output, config)
+    cases = load_cases(args.dataset, args.split, args.max_samples)
+    ecg_dir = args.ecg_dir.expanduser().resolve(strict=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     previous = {r["case_id"]: r for r in read_rows(args.output)} if args.output.exists() else {}
     factory = providers.factory(args.provider, args.model, args.max_tokens, sglang_url=args.sglang_url)
     classifier = None
@@ -191,7 +183,11 @@ def main():
             key = case["case_id"]
             if previous.get(key, {}).get("status") == "ok":
                 continue
-            record = run_case(case, paths[key], factory, classifier, args)
+            try:
+                record = run_case(case, ecg_dir, factory, classifier, args)
+            except (OSError, ValueError) as error:
+                record = {"case_id": key, "ecg_file": case["ecg_file"],
+                          "status": "error", "error": str(error), "turns": []}
             append(stream, record)
             failed += record["status"] != "ok"
             print(f"{key}: {record['status']}", flush=True)

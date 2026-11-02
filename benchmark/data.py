@@ -1,58 +1,22 @@
-"""Freeze ECG-MTD rows into a local benchmark; shared JSONL helpers."""
+"""Load ECG-MTD dialogues and prepare ECG-Agent's local ECG files."""
 
-import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 
-
-def decode(value):
-    return json.loads(value) if isinstance(value, str) else value
+DATASET = "gustmd0121/12-lead-ecg-mtd-dataset"
 
 
 def read_rows(path):
-    path = Path(path)
-    with path.open() as stream:
-        if path.suffix == ".json":
-            rows = json.load(stream)
-        else:
-            rows = [json.loads(line) for line in stream if line.strip()]
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        raise ValueError(f"Expected a JSON array or JSONL objects: {path}")
-    return rows
+    with Path(path).open() as stream:
+        return [json.loads(line) for line in stream if line.strip()]
 
 
 def append(stream, row):
     stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
     stream.flush()
     os.fsync(stream.fileno())
-
-
-def digest(path):
-    result = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            result.update(chunk)
-    return result.hexdigest()
-
-
-def check_run(output, config):
-    """Resume only when inputs, code, and settings still match."""
-    output = Path(output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    manifest = output.with_suffix(output.suffix + ".meta.json")
-    if manifest.exists():
-        if json.loads(manifest.read_text()) != config:
-            raise ValueError(f"Run settings changed; use a new output: {output}")
-    else:
-        if output.exists():
-            raise ValueError(f"Missing run metadata for {output}; use a new output")
-        manifest.write_text(json.dumps(config, indent=2) + "\n")
-
-
-def user_turns(dialogue):
-    return [turn["content"] for turn in dialogue if turn["role"] == "user"]
 
 
 def reference_responses(dialogue):
@@ -79,97 +43,43 @@ def reference_responses(dialogue):
     return responses
 
 
-def load_cases(path):
-    cases = read_rows(path)
-    validate_cases(cases)
+def load_cases(dataset=DATASET, split="test", max_samples=None):
+    from datasets import load_dataset
+
+    if max_samples is not None and max_samples <= 0:
+        raise ValueError("max_samples must be positive")
+    rows = load_dataset(dataset, split=f"{split}[:{max_samples}]" if max_samples else split)
+    cases = []
+    for row in rows:
+        metadata = json.loads(row["metadata"])
+        dialogue = json.loads(row["dialogue"])
+        cases.append({"case_id": str(metadata["ecg_id"]),
+                      "ecg_file": json.loads(row["ecg_files"])[0],
+                      "cefr_level": metadata["cefr_level"],
+                      "user_turns": [turn["content"] for turn in dialogue if turn["role"] == "user"],
+                      "reference_dialogue": dialogue})
     return cases
 
 
-def validate_cases(cases):
-    seen = set()
-    for case in cases:
-        key = case["case_id"]
-        if not isinstance(key, str) or not key or key in seen:
-            raise ValueError(f"Missing or duplicate case ID: {key}")
-        seen.add(key)
-        path = Path(case["ecg_file"])
-        if path.is_absolute() or ".." in path.parts or path.suffix != ".mat":
-            raise ValueError(f"Expected a relative .mat path: {path}")
-        if case["cefr_level"] not in ("A", "B", "C", "A1", "A2", "B1", "B2", "C1", "C2"):
-            raise ValueError(f"Missing or invalid CEFR level for {key}")
-        queries = case["user_turns"]
-        if not queries or not all(isinstance(q, str) and q.strip() for q in queries):
-            raise ValueError(f"Missing user turns for {key}")
-        if queries != user_turns(case["reference_dialogue"]):
-            raise ValueError(f"Reference user turns differ for {key}")
-        responses = reference_responses(case["reference_dialogue"])
-        if len({r["turn"] for r in responses}) != len(responses):
-            raise ValueError(f"Multiple reference responses for one user turn: {key}")
-        if any(not isinstance(r["response"], str) or not r["response"].strip() for r in responses):
-            raise ValueError(f"Empty reference response for {key}")
-    if not cases:
-        raise ValueError("Empty benchmark")
+def prepare_ecg(ecg_dir, ecg_file, destination):
+    """Reuse ECG-Agent MAT files, or prepare a raw PTB-XL record the same way."""
+    source = (ecg_dir / ecg_file).resolve()
+    source.relative_to(ecg_dir)
+    if source.is_file():
+        shutil.copyfile(source, destination)
+        return
 
+    import numpy as np
+    from scipy.io import savemat
+    import wfdb
 
-def load_source(name, split):
-    if Path(name).is_file():
-        return read_rows(name), {"file": str(Path(name).resolve()), "sha256": digest(name)}
-    from datasets import load_dataset
-
-    dataset = load_dataset(name, split=split)
-    return dataset, {"dataset": name, "split": split,
-                     "fingerprint": dataset._fingerprint}
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", required=True, help="HF dataset ID or local JSON/JSONL export")
-    parser.add_argument("--split", default="test")
-    parser.add_argument("--reference", help="Optional separate reference dataset/export")
-    parser.add_argument("--reference-split", default="train")
-    parser.add_argument("--reference-revision")
-    parser.add_argument("--ids", type=Path, help="ECG IDs, one per line, from a comparison cohort")
-    parser.add_argument("--limit", type=int, help="First N selected dialogues in source order")
-    parser.add_argument("--output", required=True, type=Path)
-    args = parser.parse_args()
-    if args.limit is not None and args.limit <= 0:
-        parser.error("--limit must be positive")
-    rows, source = load_source(args.dataset, args.split)
-    references = {}
-    if args.reference:
-        reference_rows, source["reference"] = load_source(
-            args.reference, args.reference_split, args.reference_revision)
-        for row in reference_rows:
-            key = str(decode(row["metadata"])["ecg_id"])
-            if key in references:
-                raise ValueError(f"Duplicate reference ECG ID: {key}")
-            references[key] = decode(row["dialogue"])
-    ids = set(args.ids.read_text().split()) if args.ids else None
-    cases = []
-    for row in rows:
-        metadata = decode(row["metadata"])
-        key = str(metadata["ecg_id"])
-        if ids is not None and key not in ids:
-            continue
-        dialogue = decode(row["dialogue"])
-        reference = references[key] if args.reference else dialogue
-        files = decode(row["ecg_files"])
-        if not isinstance(files, list) or len(files) != 1:
-            raise ValueError(f"Expected exactly one ECG file for {key}")
-        cases.append({"case_id": key, "ecg_id": key, "ecg_file": files[0],
-                      "cefr_level": metadata["cefr_level"], "user_turns": user_turns(dialogue),
-                      "reference_dialogue": reference, "source": source})
-    if ids is not None and ids - {c["case_id"] for c in cases}:
-        raise ValueError("Requested cohort IDs are absent from the dataset")
-    if args.limit:
-        cases = cases[:args.limit]
-    validate_cases(cases)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("x") as stream:
-        for case in cases:
-            append(stream, case)
-    print(f"Saved {len(cases)} dialogues to {args.output}")
-
-
-if __name__ == "__main__":
-    main()
+    # PTB-XL's records500 layout; ECG-Agent names its prepared files HR<id>.mat.
+    ecg_id = int(Path(ecg_file).stem.removeprefix("HR"))
+    folder = f"{ecg_id // 1000 * 1000:05d}"
+    records = ecg_dir / "records500" if (ecg_dir / "records500").is_dir() else ecg_dir
+    record = records / folder / f"{ecg_id:05d}_hr"
+    signal, metadata = wfdb.rdsamp(str(record))
+    if metadata["fs"] != 500 or signal.shape[1] != 12 or np.isnan(signal).any():
+        raise ValueError(f"Expected a 500 Hz, 12-lead ECG without NaNs: {record}")
+    # Match src/preprocess/preprocess_ptbxl.py: transpose, keep all leads, no scaling.
+    savemat(destination, {"feats": signal.T, "curr_sample_rate": metadata["fs"]})

@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 measurements = ["joblib", "neurokit2", "numpy"]
 classification = ["numpy", "scipy"]
+benchmark = ["datasets", "joblib", "neurokit2", "numpy", "wfdb"]
 
 [project.scripts]
 eko = "host:main"
@@ -25,6 +26,7 @@ eko = "host:main"
 [tool.setuptools]
 py-modules = ["eko", "host", "ui"]
 packages = [
+    "benchmark",
     "providers",
     "toolbox",
     "toolbox.measurements",

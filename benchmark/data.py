@@ -15,24 +15,6 @@ def lead_context(dataset, requested=None):
     return leads
 
 
-def reference_history(dialogue, user_index):
-    """Reference turns before the selected user turn."""
-    history = []
-    position = -1
-    for turn in dialogue:
-        if turn["role"] == "user":
-            position += 1
-        if position >= user_index:
-            break
-        fields = ("role", "content")
-        if turn["role"] == "assistant":
-            fields = ("role", "action", "thought",
-                      "tool_output" if "tool_output" in turn else "content")
-        entry = {key: turn[key] for key in fields if key in turn}
-        history.append(entry)
-    return history
-
-
 def read_rows(path):
     with Path(path).open() as stream:
         return [json.loads(line) for line in stream if line.strip()]
@@ -44,13 +26,24 @@ def append(stream, row):
     os.fsync(stream.fileno())
 
 
+def response_text(text):
+    """Remove Qwen reasoning; its opening tag may be prefilled by the template."""
+    if "</think>" in text:
+        return text.split("</think>", 1)[1].strip()
+    if "<think>" in text:
+        raise ValueError("Response contains an unclosed reasoning block")
+    return text.strip()
+
+
 def reference_responses(dialogue):
     """ECG-Agent response categories by user-turn position."""
     responses = []
     user_index = -1
+    query = ""
     for index, turn in enumerate(dialogue):
         if turn["role"] == "user":
             user_index += 1
+            query = turn["content"]
         if turn["role"] != "assistant" or turn.get("action") != "response":
             continue
         previous = dialogue[index - 1] if index else {}
@@ -64,8 +57,27 @@ def reference_responses(dialogue):
             category = "direct_response"
         if category and user_index >= 0:
             responses.append({"turn": user_index, "category": category,
-                              "response": turn["content"]})
+                              "query": query, "response": turn["content"]})
     return responses
+
+
+def load_references(dataset, split):
+    """Index judge references by ECG ID and exact user question."""
+    from datasets import load_dataset
+
+    references = {}
+    for row in load_dataset(dataset, split=split):
+        key = str(json.loads(row["metadata"])["ecg_id"])
+        if key in references:
+            raise ValueError(f"Duplicate reference ECG ID: {key}")
+        queries = {}
+        for reference in reference_responses(json.loads(row["dialogue"])):
+            query = reference["query"]
+            if query in queries:
+                raise ValueError(f"Duplicate reference question for ECG {key}: {query!r}")
+            queries[query] = reference
+        references[key] = queries
+    return references
 
 
 def load_cases(dataset=DATASET, split="test", max_samples=None, leads=None):

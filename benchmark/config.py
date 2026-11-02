@@ -14,7 +14,6 @@ def parse_args(parser, section):
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--leads", choices=LEAD_CONTEXTS,
                         help="Dialogue lead context; tools always receive all 12 leads")
-    parser.add_argument("--history", choices=("generated", "ground_truth"), default="generated")
     probe = argparse.ArgumentParser(add_help=False)
     probe.add_argument("--config", type=Path)
     config, _ = probe.parse_known_args()
@@ -22,6 +21,9 @@ def parse_args(parser, section):
         settings = json.loads(config.config.read_text())
         defaults = {key: value for key, value in settings.items() if key not in ("run", "score")}
         defaults.update(settings.get(section, {}))
+        unknown = defaults.keys() - {action.dest for action in parser._actions}
+        if unknown:
+            parser.error(f"Unknown config options: {', '.join(sorted(unknown))}")
         parser.set_defaults(**defaults)
         for action in parser._actions:
             if defaults.get(action.dest) is not None:
@@ -31,8 +33,6 @@ def parse_args(parser, section):
         parser.error("--max-samples must be positive")
     if args.leads is not None and args.leads not in LEAD_CONTEXTS:
         parser.error(f"--leads must be one of {', '.join(LEAD_CONTEXTS)}")
-    if args.history not in ("generated", "ground_truth"):
-        parser.error("--history must be generated or ground_truth")
     return args
 
 

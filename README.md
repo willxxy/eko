@@ -76,41 +76,77 @@ uv run python host.py --provider sglang \
 --sglang-url http://127.0.0.1:30001
 ```
 
+For Qwen3 reasoning models, launch SGLang with `--reasoning-parser qwen3` to
+[separate reasoning from final content](https://docs.sglang.io/docs/advanced_features/separate_reasoning).
+
 ## ECG-Agent adaptation
 
 For all current measurements in `toolbox/measurements/`, we follow [ECG-Agent](https://github.com/gustmd0121/ECG-Agent) exactly in calculating them. We also maintain the exact tools used in ECG-Agent, and shown to the LLM.
 
 ## Benchmark experiments
 
-Twelve configs in `benchmark/experiments/`: [six datasets](https://huggingface.co/gustmd0121/datasets)
-× generated or ground truth history. Each has separate outputs.
+The three main configs cover ECG-Agent's response accuracy/completeness,
+tool faithfulness, dialogue naturalness, and CEFR adherence. NAP and explanation
+TIoU are excluded. Each uses the original test questions, generated history, and
+the corresponding published `-gt` dataset as judge references.
+
+| Dialogue leads | Config |
+| --- | --- |
+| 12-lead | [`12-lead.json`](benchmark/experiments/12-lead.json) |
+| Lead I | [`single-lead-I.json`](benchmark/experiments/single-lead-I.json) |
+| Lead II | [`single-lead-II.json`](benchmark/experiments/single-lead-II.json) |
+
+Run from the repository root with SGLang already running. The generation script
+contains the ECG directory and classifier checkpoint paths; edit them if needed.
+Both scripts process all three lead configurations.
 
 ```bash
-uv sync --extra benchmark
+uv sync
+bash scripts/run_sglang.sh
 
-uv run python -m benchmark.run \
-  --config benchmark/experiments/single-lead-I-gt-reference-history.json \
-  --ecg-dir /path/to/ptbxl_preprocessed/mat_files \
-  --model Qwen/Qwen3.8-27B \
-  --sglang-url http://127.0.0.1:30001 \
-  --classifier-checkpoint /path/to/checkpoint.pt
-
-uv run python -m benchmark.score \
-  --config benchmark/experiments/single-lead-I-gt-reference-history.json
+export OPENROUTER_API_KEY="your-key"
+bash scripts/eval.sh
 ```
 
-Shared keys: `dataset`, `split`, `max_samples`, `leads`, `history`.
+For a small check, append `--max-samples 3` to both script commands. Other command
+options are forwarded to every configuration. Outputs are in
+`benchmark-results/{12-lead,single-lead-I,single-lead-II}/`;
+each contains `responses.jsonl`, `scores.jsonl`, and `scores.summary.json`.
+
+Shared keys: `dataset`, `split`, `max_samples`, `leads`.
 `run` and `score` hold command options using underscores. CLI overrides JSON;
 paths are relative to the working directory. Use separate outputs when changing settings.
 
-`generated` keeps model history. `ground_truth` uses a fresh agent per turn with
-prior reference messages and tool outputs. The current reference answer is excluded.
-Both modes receive tool examples every turn and execute tools for new findings.
+`dataset` selects inference questions. The score-only
+`reference_dataset` and `reference_split` select judge answers. References are
+matched by ECG ID and exact user question, independently of row or turn order.
+`max_samples` limits inference cases; the full reference dataset is searched.
+Unmatched answers are reported as `missing_reference` and excluded from score means.
+Duplicate reference questions and mismatched generated questions stop scoring.
+
+The agent keeps its generated conversation and tool results throughout each case.
+Reference answers are loaded only by the scorer. Each turn receives tool examples
+and executes tools for new findings.
+Saved answers and judge inputs exclude Qwen `<think>` reasoning, including older
+response files. Execution traces retain the original model output.
+
+Summary fields correspond to the paper's metrics:
+
+| Paper result | Summary field |
+| --- | --- |
+| Table 1: post-tool accuracy/completeness | `tool_response` (pooled post-classification and post-measurement responses) |
+| Table 2: direct accuracy/completeness | `metrics.direct_response` |
+| Table 4: faithfulness | `metrics.faithfulness` (binary mean; multiply by 100 for percent) |
+| Table 5: naturalness/CEFR adherence | `metrics.dialogue` |
+
+Each mean includes only successfully scored tasks and is accompanied by its count.
+Per-category post-classification and post-measurement scores are also retained.
+The paper averages Tables 2 and 5 across lead configurations; these files report
+each configuration separately. See the [evaluation protocol](https://arxiv.org/html/2601.20323v1#S3.SS3).
 
 Input: ECG-Agent's preprocessed 12-lead MAT files (`HR25.mat` for dataset filename
-`HR00025.mat`). Single-lead runs zero other channels; measurements use I for
-single-lead-I, II otherwise. Classifier accuracy
-on masked inputs requires validation. Classification requires a checkpoint.
+`HR00025.mat`). Tools currently receive all 12 leads in every dialogue configuration;
+measurements use lead II. Classification requires a checkpoint.
 
 Scoring requires `OPENROUTER_API_KEY`; `--dry-run` saves prompts only.
 Execution defaults to Linux Bubblewrap; use `--execution local` to run locally.

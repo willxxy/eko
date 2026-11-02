@@ -1,3 +1,5 @@
+import warnings
+
 from .heart_rate import heart_rate
 from .pr_interval import pr_interval
 from .qrs_duration import qrs_duration
@@ -14,8 +16,10 @@ def ecg_analysis(ecg_path: str) -> dict[str, str | None]:
     try:
         values = {name: (measure(ecg_path), digits)
                   for name, (measure, digits) in measurements.items()}
-    except Exception:
+    except Exception as error:
         # ECG-Agent's CSV interface represents failed analyses as missing values.
+        warnings.warn(f"ECG measurement failed ({type(error).__name__}): {error}",
+                      RuntimeWarning, stacklevel=2)
         return dict.fromkeys(measurements)
     return {name: f"{value:.{digits}f}" if value is not None else None
             for name, (value, digits) in values.items()}

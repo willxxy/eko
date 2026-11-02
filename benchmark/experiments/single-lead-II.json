@@ -2,11 +2,13 @@
   "dataset": "gustmd0121/single-lead-II-ecg-mtd-dataset",
   "split": "test",
   "leads": "single-lead-II",
-  "history": "generated",
   "run": {
     "output": "benchmark-results/single-lead-II/responses.jsonl"
   },
   "score": {
+    "reference_dataset": "gustmd0121/single-lead-II-ecg-mtd-dataset-gt",
+    "reference_split": "test",
+    "judge_model": "google/gemini-2.5-pro",
     "responses": "benchmark-results/single-lead-II/responses.jsonl",
     "output": "benchmark-results/single-lead-II/scores.jsonl"
   }

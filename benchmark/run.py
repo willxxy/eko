@@ -18,7 +18,7 @@ from rich.console import Console
 from rich.progress import track
 
 from .config import parse_args, save_settings
-from .data import append, lead_context, load_cases, prepare_ecg, read_rows, reference_history
+from .data import append, lead_context, load_cases, prepare_ecg, read_rows, response_text
 
 ROOT = Path(__file__).resolve().parents[1]
 console = Console(highlight=False)
@@ -48,7 +48,6 @@ print(ecg_classifier('record.mat'))
 When using tools, execute them with Python and print their results before answering.
 End each completed user answer with <done/>.
 
-{history}
 User: {query}"""
 
 
@@ -84,6 +83,7 @@ def answer(agent, events, prompt, timeout, max_steps):
         if event.type == "response":
             steps += 1
             text, code = event.value
+            text = response_text(text)
             if code is None and "<done/>" in text:
                 final = text.replace("<done/>", "").strip()
             elif steps >= max_steps:
@@ -103,7 +103,8 @@ def show_turn(case, turn):
     for event in turn["trace"]:
         if event["type"] == "response":
             console.print("Assistant:", style="bold")
-            console.print(event["text"].replace("<done/>", "").strip(), markup=False)
+            console.print(response_text(event["text"]).replace("<done/>", "").strip(),
+                          markup=False)
         elif event["type"] == "result":
             console.print(f"Python output (exit {event['returncode']}):", style="bold")
             console.print(event["output"].strip() or "(no output)", markup=False)
@@ -112,7 +113,7 @@ def show_turn(case, turn):
     console.print()
 
 
-def run_session(case, ecg_dir, factory, classifier, args, indices):
+def run_case(case, ecg_dir, factory, classifier, args):
     record = {"case_id": case["case_id"], "ecg_file": case["ecg_file"], "turns": []}
     # References and result files are outside the agent workspace.
     with tempfile.TemporaryDirectory(prefix="eko-bench-", dir="/tmp") as directory, ExitStack() as resources:
@@ -149,14 +150,8 @@ def run_session(case, ecg_dir, factory, classifier, args, indices):
         try:
             if not agent.ready.wait(10) or agent.proc.poll() is not None:
                 raise RuntimeError(agent.startup_error())
-            for index in indices:
-                query = case["user_turns"][index]
-                history = ""
-                if args.history == "ground_truth" and index:
-                    history = ("Previous reference conversation (before the current question):\n"
-                               + json.dumps(reference_history(case["reference_dialogue"], index),
-                                            ensure_ascii=False))
-                prompt = INSTRUCTION.format(query=query, leads=case["leads"], history=history)
+            for index, query in enumerate(case["user_turns"]):
+                prompt = INSTRUCTION.format(query=query, leads=case["leads"])
                 result = answer(agent, events, prompt, args.turn_timeout, args.max_steps)
                 turn = {"turn": index, "query": query, **result}
                 record["turns"].append(turn)
@@ -164,26 +159,10 @@ def run_session(case, ecg_dir, factory, classifier, args, indices):
                     show_turn(case, turn)
                 if result["status"] != "ok":
                     break
-            record["status"] = ("ok" if len(record["turns"]) == len(indices)
+            record["status"] = ("ok" if len(record["turns"]) == len(case["user_turns"])
                                 and all(t["status"] == "ok" for t in record["turns"]) else "error")
         except (OSError, RuntimeError) as error:
             record.update(status="error", error=str(error))
-    return record
-
-
-def run_case(case, ecg_dir, factory, classifier, args):
-    indices = range(len(case["user_turns"]))
-    if args.history == "generated":
-        return run_session(case, ecg_dir, factory, classifier, args, indices)
-    record = {"case_id": case["case_id"], "ecg_file": case["ecg_file"],
-              "turns": [], "status": "ok"}
-    for index in indices:
-        # A fresh agent and workspace prevent generated answers or files carrying over.
-        result = run_session(case, ecg_dir, factory, classifier, args, (index,))
-        record["turns"].extend(result["turns"])
-        if result["status"] != "ok":
-            record.update(status="error", error=result.get("error", "User turn failed"))
-            break
     return record
 
 
@@ -212,8 +191,8 @@ def main():
     args.leads = lead_context(args.dataset, args.leads)
     args.ecg_dir = args.ecg_dir.expanduser().resolve()
     settings = {key: value for key, value in vars(args).items() if key not in ("config", "output")}
-    settings.update(tool_leads="12-lead", measurement_lead="II", temperature=0.0,
-                    instruction=INSTRUCTION)
+    settings.update(history="generated", tool_leads="12-lead", measurement_lead="II",
+                    temperature=0.0, instruction=INSTRUCTION)
     save_settings(args.output, settings)
     cases = load_cases(args.dataset, args.split, args.max_samples, args.leads)
     previous = {r["case_id"]: r for r in read_rows(args.output)} if args.output.exists() else {}

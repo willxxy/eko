@@ -12,23 +12,43 @@ from rich.console import Console
 from rich.progress import track
 
 from .config import parse_args, save_settings
-from .data import append, lead_context, load_cases, read_rows, reference_responses
+from .data import (append, lead_context, load_cases, load_references, read_rows,
+                   reference_responses, response_text)
 from .prompts import direct_prompt, faithfulness_prompt, quality_prompt, tool_prompt
 
 JUDGE = "google/gemini-2.5-pro"
 console = Console(highlight=False)
 
 
-def tasks(cases, responses):
+def tasks(cases, responses, references):
     for case in cases:
         key = case["case_id"]
         record = responses.get(key, {})
-        turns = {turn["turn"]: turn for turn in record.get("turns", [])}
-        for reference in reference_responses(case["reference_dialogue"]):
-            index, category = reference["turn"], reference["category"]
+        turns = {}
+        for turn in record.get("turns", []):
+            turn = dict(turn)
+            index = turn["turn"]
+            if index in turns:
+                raise ValueError(f"Duplicate response turn for ECG {key}: {index}")
+            if (index < 0 or index >= len(case["user_turns"])
+                    or turn.get("query") != case["user_turns"][index]):
+                raise ValueError(f"Response question differs for ECG {key}, turn {index}")
+            if turn.get("status") == "ok":
+                turn["response"] = response_text(turn["response"])
+            turns[index] = turn
+        expected = {entry["turn"]: entry["category"]
+                    for entry in reference_responses(case["reference_dialogue"])}
+        for index, query in enumerate(case["user_turns"]):
+            reference = references.get(key, {}).get(query)
+            if reference is None and index not in expected:
+                continue
+            category = reference["category"] if reference else expected[index]
             turn = turns.get(index, {})
             task = {"id": f"{key}:response:{index}", "case_id": key, "metric": "response",
                     "turn": index, "category": category}
+            if reference is None:
+                yield {**task, "status": "missing_reference", "query": query}
+                continue
             if turn.get("status") != "ok":
                 yield {**task, "status": "missing_response"}
                 continue
@@ -84,10 +104,10 @@ def parse_scores(text, metric):
     return scores
 
 
-def summarize(rows):
+def summarize(rows, *, group_by="category"):
     summary = {}
     for row in rows:
-        group = row.get("category", row["metric"])
+        group = row.get(group_by, row["metric"])
         entry = summary.setdefault(group, {"total": 0, "scored": 0, "status_counts": {}, "means": {}})
         entry["total"] += 1
         status = row["status"]
@@ -104,6 +124,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--responses", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--reference-dataset", required=True,
+                        help="Judge reference answers; independent of the inference dataset")
+    parser.add_argument("--reference-split", default="test")
     parser.add_argument("--judge-model", default=JUDGE)
     parser.add_argument("--dry-run", action="store_true", help="Save judge prompts without API calls")
     args = parse_args(parser, "score")
@@ -111,15 +134,19 @@ def main():
     response_config = args.responses.with_suffix(args.responses.suffix + ".config.json")
     if response_config.exists():
         settings = json.loads(response_config.read_text())
-        changed = [key for key in ("dataset", "split", "leads", "history")
+        if settings.get("history") != "generated":
+            parser.error("Responses must use generated conversation history")
+        changed = [key for key in ("dataset", "split", "leads")
                    if settings.get(key) != getattr(args, key)]
         if changed:
             parser.error(f"Response settings differ: {', '.join(changed)}")
-    save_settings(args.output, {key: value for key, value in vars(args).items()
-                                if key not in ("config", "output", "dry_run")})
     cases = load_cases(args.dataset, args.split, args.max_samples, args.leads)
+    references = load_references(args.reference_dataset, args.reference_split)
     responses = {row["case_id"]: row for row in read_rows(args.responses)}
-    planned = list(tasks(cases, responses))
+    planned = list(tasks(cases, responses, references))
+    settings = {key: value for key, value in vars(args).items()
+                if key not in ("config", "output", "dry_run")}
+    save_settings(args.output, {**settings, "history": "generated"})
     api_key = None if args.dry_run else os.environ["OPENROUTER_API_KEY"]
     existing = {row["id"]: row for row in read_rows(args.output)} if args.output.exists() else {}
     results = []
@@ -158,14 +185,20 @@ def main():
     counts = Counter(row["status"] for row in results)
     skipped = {status: count for status, count in counts.items()
                if status not in ("ok", "pending", "judge_error")}
-    report = {"dataset": args.dataset, "split": args.split, "leads": args.leads,
-              "history": args.history, "judge_model": args.judge_model,
+    tool_rows = [row for row in results
+                 if row.get("category") in ("post_classification", "post_measurement")]
+    tool_response = summarize(tool_rows, group_by="metric").get("response", {
+        "total": 0, "scored": 0, "status_counts": {}, "means": {}})
+    report = {"dataset": args.dataset, "split": args.split,
+              "reference_dataset": args.reference_dataset,
+              "reference_split": args.reference_split, "leads": args.leads,
+              "history": "generated", "judge_model": args.judge_model,
               "dialogues_expected": len(cases),
               "dialogues_completed": sum(responses.get(c["case_id"], {}).get("status") == "ok" for c in cases),
               "tasks_expected": len(planned), "tasks_recorded": len(results),
               "tasks_resumed": resumed, "tasks_unprocessed": len(planned) - len(results),
               "status_counts": dict(counts), "skipped": skipped,
-              "metrics": summarize(results)}
+              "metrics": summarize(results), "tool_response": tool_response}
     path = args.output.with_suffix(".summary.json")
     path.write_text(json.dumps(report, indent=2) + "\n")
     console.print(f"Tasks: {len(results)}/{len(planned)} recorded, {resumed} reused, "
@@ -178,6 +211,9 @@ def main():
         means = ", ".join(f"{name}={value:.3f}" for name, value in entry["means"].items())
         console.print(f"{group}: {entry['scored']}/{entry['total']} scored" +
                       (f"; {means}" if means else ""))
+    means = ", ".join(f"{name}={value:.3f}" for name, value in tool_response["means"].items())
+    console.print(f"Tool responses: {tool_response['scored']}/{tool_response['total']} scored" +
+                  (f"; {means}" if means else ""))
     console.print(f"Summary: {path}", markup=False)
     if any(row["status"] == "judge_error" for row in results):
         raise SystemExit(1)

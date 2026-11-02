@@ -83,18 +83,14 @@ For Qwen3 reasoning models, launch SGLang with `--reasoning-parser qwen3` to
 
 For all current measurements in `toolbox/measurements/`, we follow [ECG-Agent](https://github.com/gustmd0121/ECG-Agent) exactly in calculating them. We also maintain the exact tools used in ECG-Agent, and shown to the LLM.
 
+We also pretrained and finetuned w2v-cmsc, the classification tool. The checkpoints are available on [huggingface](https://huggingface.co/ELM-Research/models).
+
 ## Benchmark experiments
 
-The three main configs cover ECG-Agent's response accuracy/completeness,
+We evaluate response accuracy/completeness,
 tool faithfulness, dialogue naturalness, and CEFR adherence. NAP and explanation
 TIoU are excluded. Each uses the original test questions, generated history, and
 the corresponding published `-gt` dataset as judge references.
-
-| Dialogue leads | Config |
-| --- | --- |
-| 12-lead | [`12-lead.json`](benchmark/experiments/12-lead.json) |
-| Lead I | [`single-lead-I.json`](benchmark/experiments/single-lead-I.json) |
-| Lead II | [`single-lead-II.json`](benchmark/experiments/single-lead-II.json) |
 
 Run from the repository root with SGLang already running. The generation script
 contains the ECG directory and classifier checkpoint paths; edit them if needed.
@@ -107,46 +103,3 @@ bash scripts/run_sglang.sh
 export OPENROUTER_API_KEY="your-key"
 bash scripts/eval.sh
 ```
-
-For a small check, append `--max-samples 3` to both script commands. Other command
-options are forwarded to every configuration. Outputs are in
-`benchmark-results/{12-lead,single-lead-I,single-lead-II}/`;
-each contains `responses.jsonl`, `scores.jsonl`, and `scores.summary.json`.
-
-Shared keys: `dataset`, `split`, `max_samples`, `leads`.
-`run` and `score` hold command options using underscores. CLI overrides JSON;
-paths are relative to the working directory. Use separate outputs when changing settings.
-
-`dataset` selects inference questions. The score-only
-`reference_dataset` and `reference_split` select judge answers. References are
-matched by ECG ID and exact user question, independently of row or turn order.
-`max_samples` limits inference cases; the full reference dataset is searched.
-Unmatched answers are reported as `missing_reference` and excluded from score means.
-Duplicate reference questions and mismatched generated questions stop scoring.
-
-The agent keeps its generated conversation and tool results throughout each case.
-Reference answers are loaded only by the scorer. Each turn receives tool examples
-and executes tools for new findings.
-Saved answers and judge inputs exclude Qwen `<think>` reasoning, including older
-response files. Execution traces retain the original model output.
-
-Summary fields correspond to the paper's metrics:
-
-| Paper result | Summary field |
-| --- | --- |
-| Table 1: post-tool accuracy/completeness | `tool_response` (pooled post-classification and post-measurement responses) |
-| Table 2: direct accuracy/completeness | `metrics.direct_response` |
-| Table 4: faithfulness | `metrics.faithfulness` (binary mean; multiply by 100 for percent) |
-| Table 5: naturalness/CEFR adherence | `metrics.dialogue` |
-
-Each mean includes only successfully scored tasks and is accompanied by its count.
-Per-category post-classification and post-measurement scores are also retained.
-The paper averages Tables 2 and 5 across lead configurations; these files report
-each configuration separately. See the [evaluation protocol](https://arxiv.org/html/2601.20323v1#S3.SS3).
-
-Input: ECG-Agent's preprocessed 12-lead MAT files (`HR25.mat` for dataset filename
-`HR00025.mat`). Tools currently receive all 12 leads in every dialogue configuration;
-measurements use lead II. Classification requires a checkpoint.
-
-Scoring requires `OPENROUTER_API_KEY`; `--dry-run` saves prompts only.
-Execution defaults to Linux Bubblewrap; use `--execution local` to run locally.

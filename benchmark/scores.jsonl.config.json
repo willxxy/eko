@@ -1,9 +1,0 @@
-{
-  "responses": "benchmark/responses.jsonl",
-  "judge_model": "google/gemini-2.5-pro",
-  "dataset": "gustmd0121/12-lead-ecg-mtd-dataset",
-  "split": "test",
-  "max_samples": 3,
-  "leads": "12-lead",
-  "history": "generated"
-}

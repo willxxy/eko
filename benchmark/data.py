@@ -83,10 +83,14 @@ def prepare_ecg(ecg_dir, ecg_file, destination, leads="12-lead"):
     """Write the selected leads from a MAT or PTB-XL record."""
     import numpy as np
     from scipy.io import loadmat, savemat
+    print(ecg_dir)
+    print(ecg_file)
 
     ecg_dir = Path(ecg_dir).resolve()
+    print(ecg_dir)
     source = (ecg_dir / ecg_file).resolve()
     source.relative_to(ecg_dir)
+    print(source)
     if source.is_file():
         data = loadmat(source)
         signal = np.asarray(data["feats"])

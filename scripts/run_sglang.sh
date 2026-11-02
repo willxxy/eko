@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for leads in 12-lead single-lead-I single-lead-II; do
+for leads in single-lead-I single-lead-II; do
   uv run python -m benchmark.run \
     --config "benchmark/experiments/${leads}.json" \
     --provider sglang \

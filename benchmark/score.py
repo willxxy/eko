@@ -2,6 +2,7 @@
 
 import argparse
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -104,6 +105,23 @@ def parse_scores(text, metric):
     return scores
 
 
+def score(task, model, api_key, dry_run):
+    row = dict(task)
+    if "status" in row:
+        return row
+    if dry_run:
+        row["status"] = "pending"
+        return row
+    row["raw_response"] = ""
+    try:
+        row["raw_response"] = judge(row["prompt"], model, api_key)
+        row["scores"] = parse_scores(row["raw_response"], row["metric"])
+        row["status"] = "ok"
+    except Exception as error:
+        row.update(status="judge_error", error=str(error))
+    return row
+
+
 def summarize(rows, *, group_by="category"):
     summary = {}
     for row in rows:
@@ -128,8 +146,12 @@ def main():
                         help="Judge reference answers; independent of the inference dataset")
     parser.add_argument("--reference-split", default="test")
     parser.add_argument("--judge-model", default=JUDGE)
+    parser.add_argument("--batch-size", type=int, default=8,
+                        help="Concurrent judge requests per batch (default: 8)")
     parser.add_argument("--dry-run", action="store_true", help="Save judge prompts without API calls")
     args = parse_args(parser, "score")
+    if args.batch_size <= 0:
+        parser.error("--batch-size must be positive")
     args.leads = lead_context(args.dataset, args.leads)
     response_config = args.responses.with_suffix(args.responses.suffix + ".config.json")
     if response_config.exists():
@@ -145,42 +167,41 @@ def main():
     responses = {row["case_id"]: row for row in read_rows(args.responses)}
     planned = list(tasks(cases, responses, references))
     settings = {key: value for key, value in vars(args).items()
-                if key not in ("config", "output", "dry_run")}
+                if key not in ("config", "output", "dry_run", "batch_size")}
     save_settings(args.output, {**settings, "history": "generated"})
     api_key = None if args.dry_run else os.environ["OPENROUTER_API_KEY"]
     existing = {row["id"]: row for row in read_rows(args.output)} if args.output.exists() else {}
     results = []
     resumed = 0
+    pending = []
+    for task in planned:
+        previous = existing.get(task["id"])
+        if (previous and previous["status"] not in ("judge_error", "pending")
+                and all(previous.get(key) == value for key, value in task.items())
+                and ("prompt" in previous) == ("prompt" in task)):
+            results.append(previous)
+            resumed += 1
+        else:
+            pending.append(task)
     detailed = args.max_samples is not None
-    with args.output.open("a") as stream:
-        for task in track(planned, description="Scoring responses", console=console, disable=detailed):
-            previous = existing.get(task["id"])
-            if (previous and previous["status"] not in ("judge_error", "pending")
-                    and all(previous.get(key) == value for key, value in task.items())
-                    and ("prompt" in previous) == ("prompt" in task)):
-                results.append(previous)
-                resumed += 1
-                continue
-            row = dict(task)
-            if "status" not in row:
-                if args.dry_run:
-                    row["status"] = "pending"
-                else:
-                    row["raw_response"] = ""
-                    try:
-                        row["raw_response"] = judge(row["prompt"], args.judge_model, api_key)
-                        row["scores"] = parse_scores(row["raw_response"], row["metric"])
-                        row["status"] = "ok"
-                    except Exception as error:
-                        row.update(status="judge_error", error=str(error))
-            append(stream, row)
-            results.append(row)
-            if detailed or row["status"] == "judge_error":
-                scores = ", ".join(f"{key}={value}" for key, value in row.get("scores", {}).items())
-                detail = row.get("error") or scores
-                console.print(f"{row['id']}: {row['status']}" + (f" ({detail})" if detail else ""),
-                              markup=False)
-            if row["status"] == "judge_error":
+    with args.output.open("a") as stream, ThreadPoolExecutor(max_workers=args.batch_size) as pool:
+        for start in track(range(0, len(pending), args.batch_size), description="Scoring batches",
+                           console=console, disable=detailed):
+            batch = pending[start:start + args.batch_size]
+            futures = [pool.submit(score, task, args.judge_model, api_key, args.dry_run)
+                       for task in batch]
+            failed = False
+            for future in futures:
+                row = future.result()
+                append(stream, row)
+                results.append(row)
+                if detailed or row["status"] == "judge_error":
+                    scores = ", ".join(f"{key}={value}" for key, value in row.get("scores", {}).items())
+                    detail = row.get("error") or scores
+                    console.print(f"{row['id']}: {row['status']}" + (f" ({detail})" if detail else ""),
+                                  markup=False)
+                failed |= row["status"] == "judge_error"
+            if failed:
                 break
     counts = Counter(row["status"] for row in results)
     skipped = {status: count for status, count in counts.items()

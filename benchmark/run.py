@@ -160,7 +160,7 @@ def run_case(case, ecg_dir, factory, classifier, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ecg-dir", required=True, type=Path,
-                        help="PTB-XL root, records500 directory, or ECG-Agent's prepared MAT directory")
+                        help="ECG-Agent's preprocessed MAT directory")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--provider", choices=("sglang", "openrouter", "huggingface"), default="sglang")
     parser.add_argument("--model", required=True)

@@ -14,7 +14,6 @@ dependencies = [
     "scipy>=1.15.3",
     "torch>=2.14.1",
     "transformers>=5.18.0",
-    "wfdb>=4.3.1",
 ]
 
 [project.scripts]

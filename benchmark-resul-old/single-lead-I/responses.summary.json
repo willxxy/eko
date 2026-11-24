@@ -1,9 +1,0 @@
-{
-  "dialogues_expected": 2153,
-  "completed": 2136,
-  "failed": 17,
-  "skipped_complete": 0,
-  "turns_completed": 6849,
-  "turns_failed": 17,
-  "turns_unattempted": 33
-}

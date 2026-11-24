@@ -75,8 +75,8 @@ def answer(agent, events, prompt, timeout, max_steps):
             steps += 1
             text, code = event.value
             text = response_text(text)
-            if code is None and "<done/>" in text:
-                final = text.replace("<done/>", "").strip()
+            if code is None and text.endswith(core.DONE_MARKER):
+                final = text.removesuffix(core.DONE_MARKER).rstrip()
             elif steps >= max_steps:
                 return {"status": "error", "error": f"Reached {max_steps} model steps",
                         "trace": trace}
@@ -94,7 +94,7 @@ def show_turn(case, turn):
     for event in turn["trace"]:
         if event["type"] == "response":
             console.print("Assistant:", style="bold")
-            console.print(response_text(event["text"]).replace("<done/>", "").strip(),
+            console.print(response_text(event["text"]).removesuffix(core.DONE_MARKER).rstrip(),
                           markup=False)
         elif event["type"] == "result":
             console.print(f"Python output (exit {event['returncode']}):", style="bold")

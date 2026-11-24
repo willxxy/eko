@@ -61,6 +61,7 @@ EKO_AGENT points to this agent's own executable. EKO_WORLD, when available, is
 an OpenRPC Unix socket.{mode}
 """
 
+DONE_MARKER = "<done/>"
 NUDGE = "Write a fenced ```python-run block, or <done/> if the prompt is resolved."
 FERAL_NUDGE = "Write a fenced ```python-run block."
 INVALID_ACTION = "Send one complete ```python-run block and stop after it. No Python was run."
@@ -329,7 +330,8 @@ class Eko:
         if reply.role != "assistant":
             raise ValueError("model must return an assistant message")
         response = message_text(reply)
-        segments = response_segments(response.rstrip())
+        body = response.rstrip()
+        segments = response_segments(body)
         code, feedback = _parse_action(segments)
         self.emit(Event("response", (response, code)))
 
@@ -340,7 +342,7 @@ class Eko:
                 return None
             inputs = (Input(PYTHON, (Text(result.output or "(no output)"),),
                             result.returncode),)
-        elif feedback or self.feral or "<done/>" not in response:
+        elif feedback or self.feral or not body.endswith(DONE_MARKER):
             nudge = feedback or (FERAL_NUDGE if self.feral else NUDGE)
             inputs = (Input(HARNESS, (Text(nudge),)),)
         else:

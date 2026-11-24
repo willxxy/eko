@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 import eko as core
+from markdown_it import MarkdownIt
 from prompt_toolkit import Application
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.document import Document
@@ -31,6 +32,8 @@ MAX_DISPLAY_OUTPUT = 4_000
 MAX_DISPLAY_LINES = 5
 GOLD = "#d7af5f"
 GOLD_ACTIVE = "#e5bd68"
+MARKDOWN_WITH_LITERAL_TAGS = MarkdownIt("commonmark", {"html": False}).enable(
+    ["strikethrough", "table"])
 
 
 def display_output(text: str, width: int = 120) -> str:
@@ -91,6 +94,7 @@ class NativeStream:
         if self.fence_length:
             self.close_box()
         else:
+            self.prose = self.prose.rstrip().removesuffix(core.DONE_MARKER)
             self.add_prose("", final=True)
 
     def line(self, line: str) -> None:
@@ -109,13 +113,15 @@ class NativeStream:
             self.add_prose(line)
 
     def add_prose(self, text: str, final: bool = False) -> None:
-        text = text.replace("<done/>", "")
         self.prose += text
         # A blank line closes a Markdown block. Keeping only the unfinished
         # block mutable prevents later tokens from restyling terminal history.
         while "\n\n" in self.prose:
-            block, self.prose = self.prose.split("\n\n", 1)
+            block, rest = self.prose.split("\n\n", 1)
+            if not final and block.rstrip().endswith(core.DONE_MARKER) and not rest.strip():
+                break
             self.render_prose(block)
+            self.prose = rest
         if final and self.prose:
             self.render_prose(self.prose)
             self.prose = ""
@@ -123,7 +129,10 @@ class NativeStream:
     def render_prose(self, text: str) -> None:
         text = text.strip()
         if text:
-            self.pending_output.append(self.ui.render(Markdown(text)) + "\n")
+            markdown = Markdown(text)
+            if core.DONE_MARKER in text:
+                markdown.parsed = MARKDOWN_WITH_LITERAL_TAGS.parse(text)
+            self.pending_output.append(self.ui.render(markdown) + "\n")
 
     def width(self) -> int:
         return max(20, shutil.get_terminal_size().columns - 2)
